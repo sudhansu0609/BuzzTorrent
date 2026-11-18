@@ -1,5 +1,6 @@
 """Streaming to the TV (TorrServer driven over HTTP) and the per-indexer Jackett search.
 A small fake TorrServer stands in for the real one."""
+import hashlib
 import json
 import re
 import threading
@@ -10,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from buzz import streamer
 from buzz.providers import TorznabProvider
 from buzz.streamer import MB, Streamer, StreamError, pick_files
 from buzz.tvstate import KEY
@@ -225,6 +227,40 @@ class SubtitleTests(unittest.TestCase):
             z.writestr("bomb.srt", "a" * (subs_mod.MAX_BYTES + 1))
         with self.assertRaises(ValueError):
             subs_mod.from_zip(buf.getvalue())
+
+
+class InstallTests(unittest.TestCase):
+    """TorrServer installs from the MatriX line: "Silo" releases have another command line."""
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.old = streamer.install_dir, streamer.fetch, streamer.av.best_engine
+        streamer.install_dir, streamer.av.best_engine = (lambda: self.dir), (lambda: None)
+
+    def tearDown(self):
+        streamer.install_dir, streamer.fetch, streamer.av.best_engine = self.old
+        self.tmp.cleanup()
+
+    def test_skips_silo_and_replaces_a_silo_install(self):
+        want, saved = streamer._asset()
+        (self.dir / saved).write_bytes(b"silo")
+        (self.dir / "VERSION.txt").write_text("Silo.2\nsha256:x\n", encoding="utf-8")
+        self.assertIsNone(streamer.find_torrserver())
+
+        body = b"matrix build"
+        digest = "sha256:" + hashlib.sha256(body).hexdigest()
+        asset = lambda tag: {"name": want, "size": len(body), "digest": digest, "browser_download_url": tag}
+        releases = [{"tag_name": "Silo.2", "assets": [asset("silo")]},
+                    {"tag_name": "MatriX.151", "prerelease": True, "assets": [asset("beta")]},
+                    {"tag_name": "MatriX.150", "assets": [asset("matrix")]}]
+        got = []
+        streamer.fetch = lambda url, policy, **kw: (got.append(url), json.dumps(releases).encode() if url == streamer.RELEASES
+                                                    else body)[1]
+        st = Streamer(self.dir, None)
+        exe = st.install()
+        self.assertEqual(got[1], "matrix")
+        self.assertEqual(Path(exe).read_bytes(), body)
+        self.assertEqual(streamer.find_torrserver(), exe)
 
 
 if __name__ == "__main__":

@@ -36,9 +36,12 @@ from . import subtitles as subs_mod
 from .content_scan import DOUBLE_EXT, PROGRAM_EXT, SCRIPT_EXT, VIDEO_EXT, ext_of, sniff
 from .safehttp import FetchError, FetchPolicy, fetch
 
-RELEASES = "https://api.github.com/repos/YouROK/TorrServer/releases/latest"
+RELEASES = "https://api.github.com/repos/YouROK/TorrServer/releases?per_page=30"
+# The release line BuzzTorrent talks to. "Silo" (Nov 2026) is a rewrite with a different command line
+# (a YAML config instead of --port/--path) and API, so its releases are skipped.
+LINE = "MatriX."
 GITHUB = FetchPolicy(("github.com", "api.github.com", "githubusercontent.com"), content_types=("json",),
-                     max_bytes=2 * 1024 * 1024, timeout=20)
+                     max_bytes=8 * 1024 * 1024, timeout=20)
 GITHUB_BIN = FetchPolicy(("github.com", "githubusercontent.com"), max_redirects=4,
                          content_types=("octet-stream", "x-msdownload", "x-executable", "binary"),
                          max_bytes=200 * 1024 * 1024, timeout=120)
@@ -77,6 +80,11 @@ def install_dir() -> Path:
 def find_torrserver(configured: str | None = None) -> str | None:
     asset = _asset()
     local = install_dir() / asset[1] if asset else None
+    try:                    # installed from another release line: install a MatriX one instead
+        if local and not (install_dir() / "VERSION.txt").read_text(encoding="utf-8").startswith(LINE):
+            local = None
+    except OSError:
+        pass
     for cand in (configured, local, osutil.which("TorrServer"), osutil.which("torrserver")):
         if cand and Path(cand).is_file():
             return str(cand)
@@ -162,7 +170,10 @@ class Streamer:
         if not asset:
             raise StreamError(f"Streaming isn't available for this kind of computer ({platform.machine()})")
         want, saved = asset
-        rel = json.loads(fetch(RELEASES, GITHUB, accept="application/vnd.github+json"))
+        releases = json.loads(fetch(RELEASES, GITHUB, accept="application/vnd.github+json"))
+        rel = next((r for r in releases if str(r.get("tag_name", "")).startswith(LINE)
+                    and not r.get("prerelease") and not r.get("draft")
+                    and any(a.get("name") == want for a in r.get("assets", []))), {})
         found = next((a for a in rel.get("assets", []) if a.get("name") == want), None)
         digest = str((found or {}).get("digest") or "")
         if not found or not digest.startswith("sha256:"):
@@ -208,9 +219,10 @@ class Streamer:
                 args = [self.exe, "--port", str(self.port), "--path", str(self.dir), "--httpauth"]
                 if listen_here:
                     args += ["--ip", "127.0.0.1"]
-                self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                             stdin=subprocess.DEVNULL, cwd=str(self.dir),
-                                             creationflags=osutil.NO_WINDOW)
+                with open(self.dir / "torrserver.log", "wb") as log:      # why it stopped, if it does
+                    self.proc = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT,
+                                                 stdin=subprocess.DEVNULL, cwd=str(self.dir),
+                                                 creationflags=osutil.NO_WINDOW)
                 (self.dir / "torrserver.pid").write_text(str(self.proc.pid))
                 for _ in range(200):                     # the first start can take a while
                     if self.proc.poll() is not None:
