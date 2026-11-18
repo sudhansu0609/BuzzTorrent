@@ -527,8 +527,11 @@ class Handler(BaseHTTPRequestHandler):
                 if self.remote:
                     raise PermissionError("only available on the PC")
                 link = str(body.get("url", ""))
+                if re.fullmatch(r"/api/tv/bt/play/[0-9a-f]{40}/\d{1,5}(\?t=[\w.~-]{1,200})?", link):
+                    link = f"http://127.0.0.1:{self.port}{link}"      # a torrent streaming through BuzzTorrent
                 vlc = find_vlc()
-                if not vlc or not re.fullmatch(r"https://([a-z0-9-]+\.)*archive\.org/download/[^\s]{1,600}", link):
+                if not vlc or not re.fullmatch(r"https://([a-z0-9-]+\.)*archive\.org/download/[^\s]{1,600}"
+                                               r"|http://127\.0\.0\.1:\d+/api/tv/bt/play/[0-9a-f]{40}/\d{1,5}(\?t=[\w.~-]{1,200})?", link):
                     raise ValueError("Install VLC to play this format on the PC")
                 subprocess.Popen([vlc, "--no-video-title-show", link], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 return self._json(200, {"ok": True})

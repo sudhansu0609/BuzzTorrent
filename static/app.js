@@ -431,6 +431,16 @@ function fillCard(li, r) {
 function bindActions(root, r) {
   const magnet = r.magnet && MAGNET_RE.test(r.magnet) ? r.magnet : null;
   const stop = (e) => e.stopPropagation(); // cards are clickable; actions shouldn't also open the popup
+  const stream = $(".act-stream", root);
+  if (stream) {
+    stream.hidden = !canStreamPc(r);
+    stream.onclick = (e) => {
+      stop(e);
+      const title = (root.id === "detail" && $("#detailTitle").textContent) || r.title;
+      closeDetail();
+      streamPc(r, title);
+    };
+  }
   const get = $(".act-get", root);
   if (get) {
     get.hidden = !dlState.available || (!magnet && !r.has_torrent);
@@ -1820,6 +1830,8 @@ function savePcProgress() {
 }
 function closePlayerPc() {
   savePcProgress();
+  if (!pcStream?.external) stopStreamPc();     // a stream handed to VLC keeps going until the next one
+  pcStream = null;
   const video = pcVideo();
   video.pause();
   video.removeAttribute("src");
@@ -1869,12 +1881,102 @@ function wirePlayer() {
     try {
       if (pcp.lib) await api("/api/library/open", { id: v.id || pcp.lib });
       else await api("/api/play/external", { url: v.url });
+      if (pcStream) pcStream.external = true;
       video.pause();
       toast("Opening in your video player");
     } catch (err) { toast(err.message, "alert"); }
   });
   $("#pcpClose").addEventListener("click", closePlayerPc);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#pcPlayer").hidden) closePlayerPc(); });
+}
+
+/* ---------------------------------------------------- ▶ Stream (PC) */
+/* A torrent plays here while it downloads, through the streaming engine the TV uses: the
+   video's pieces come in playing order and stay in memory, nothing is saved to disk. */
+const canStreamPc = (r) => !isFree(r) && r.verdict !== "danger" && !!(r.infohash || r.magnet || r.has_torrent);
+let pcStream = null;
+function pcpStage(lines) {
+  const m = $("#pcpMsg");
+  m.replaceChildren(h("div", {}, ...lines.filter(Boolean).map((t) => h("div", { text: t }))));
+  m.hidden = false;
+}
+function stopStreamPc() {
+  if (pcStream?.hash) api("/api/tv/bt/stop", { hash: pcStream.hash }).catch(() => {});
+}
+function pickStreamFile(files) {
+  pcpStage([`${files.length} videos in this torrent. Choose one below.`]);
+  const eps = $("#pcpEps");
+  eps.hidden = false;
+  return new Promise((pick) => eps.replaceChildren(...files.map((f) => h("button", { type: "button", class: "btn btn-ghost btn-sm",
+    text: [f.name, f.resume ? "resume " + fmtClock(f.resume) : "", fmtSize(f.size)].filter(Boolean).join(" · "),
+    onclick: () => { eps.hidden = true; pick(f.index); } }))));
+}
+async function streamPc(r, title) {
+  if (pcStream) stopStreamPc();
+  const s = { hash: "", index: null, prepared: false, private: r.category === "adult", external: false };
+  pcStream = s;
+  const alive = () => pcStream === s && !$("#pcPlayer").hidden;
+  const wait = (ms) => new Promise((ok) => setTimeout(ok, ms));
+  Object.assign(pcp, { files: [], i: 0, title, lib: null, like: null });
+  const video = pcVideo();
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  $("#pcpTitle").textContent = title;
+  for (const id of ["#pcpLike", "#pcpRestart", "#pcpExternal", "#pcpEps"]) $(id).hidden = true;
+  fillSelect($("#pcpQuality"), [["0", r.quality?.label || "Stream"]], "0");
+  $("#pcpSubs").parentElement.hidden = true;
+  $("#pcpSub").textContent = "";
+  $("#pcPlayer").hidden = false;
+  pcpStage(["Connecting…"]);
+  try {
+    // 1. hand the torrent to the streaming engine (set up once, the first time)
+    while (alive() && !s.hash) {
+      const d = await api("/api/tv/bt/start", { id: r.id });
+      if (!d.installing) { s.hash = d.hash; s.private = !!d.private; break; }
+      const st = await api("/api/tv/bt/status?h=").catch(() => ({}));
+      if (st.stage === "error") throw new Error(st.error);
+      pcpStage([st.state === "scanning" ? "Setting up streaming (one time): virus-checking it…"
+        : "Setting up streaming (one time, about 60 MB)…"]);
+      await wait(1500);
+    }
+    // 2. follow it: file list, safety check, buffer, then play
+    while (alive()) {
+      const st = await api(`/api/tv/bt/status?h=${s.hash}&i=${s.index ?? ""}`);
+      if (!alive()) return;
+      if (st.stage === "error") throw new Error(st.error);
+      if (st.stage === "choose" && s.index === null) {
+        s.index = st.files.length === 1 ? st.files[0].index : await pickStreamFile(st.files);
+        if (!alive()) return;
+      }
+      if (st.stage === "choose" && !s.prepared) {
+        s.prepared = true;
+        await api("/api/tv/bt/prepare", { hash: s.hash, index: s.index });
+        continue;
+      }
+      if (st.stage === "ready" && st.url) return launchStreamPc(r, s, st, title);
+      const peers = st.total_peers ? `${st.peers} of ${st.total_peers} peers connected` : "looking for peers";
+      const stage = { metadata: "Finding the video…", checking: "Checking it's a real video…",
+        buffering: `Buffering… ${st.preload_size ? Math.round((st.preloaded / st.preload_size) * 100) : 0}%` }[st.stage] || "Starting…";
+      pcpStage([stage, [peers, st.speed ? `${fmtSize(st.speed)}/s` : ""].filter(Boolean).join(" · "),
+        ...(st.warnings || []).map((w) => "⚠ " + w)]);
+      await wait(1000);
+    }
+  } catch (err) {
+    if (alive()) pcpStage(["⚠ " + err.message]);
+  }
+}
+async function launchStreamPc(r, s, st, title) {
+  const f = (st.files || []).find((x) => x.index === s.index) || {};
+  let subs = [];
+  try { subs = (await api(`/api/tv/bt/subs?h=${s.hash}&i=${s.index}`)).subs; } catch { /* none */ }
+  if (pcStream !== s || $("#pcPlayer").hidden) return;
+  const ext = /\.([a-z0-9]{2,4})$/i.test(f.name || "") ? f.name.split(".").pop() : "";
+  const name = (st.files || []).length > 1 ? f.name : title;
+  openPlayer({ title, progress: s.private ? "" : st.progress, thumb: s.private ? "" : r.thumb || "",
+    like: s.private ? null : likeInfo(r),
+    files: [{ name, key: s.private ? "" : `bt:${s.hash}:${s.index}`, resume: f.resume || 0, subs,
+      versions: [{ url: st.url, label: r.quality?.label || "Stream", format: ext.toUpperCase() }] }] });
 }
 
 /* ------------------------------------------------------- voice (PC) */
