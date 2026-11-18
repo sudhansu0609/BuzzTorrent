@@ -52,7 +52,7 @@ class SubtitleTests(unittest.TestCase):
 class LibraryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.folder = Path(self.tmp.name)
+        self.folder = Path(self.tmp.name).resolve()   # as validate_folder does (macOS temp is a symlink)
         good = self.folder / "Sholay.1975.1080p"
         good.mkdir()
         (good / "Sholay.1975.1080p.mkv").write_bytes(MKV_HEAD)
@@ -153,7 +153,7 @@ class StreamTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
-        folder = Path(cls.tmp.name)
+        folder = Path(cls.tmp.name).resolve()
         cls.body = MKV_HEAD + bytes(range(256)) * 40
         (folder / "Film.mkv").write_bytes(cls.body)
         scanner = FakeScanner(folder, {"Film.mkv": report(folder, "Film.mkv", "clean")})

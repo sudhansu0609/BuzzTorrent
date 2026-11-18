@@ -176,6 +176,29 @@ class ScannerFlowTests(unittest.TestCase):
         self.assertIsNone(self.sc._inside(self.dl, "../../etc/passwd"))
 
 
+class ClamAVFallbackTest(unittest.TestCase):
+    def test_clamdscan_without_clamd_falls_back_to_clamscan(self):
+        runs = []
+
+        def fake_run(args, timeout):
+            runs.append(args[0])
+            if args[0] == "clamdscan":       # what Homebrew's clamdscan says with no clamd set up
+                return av.subprocess.CompletedProcess(args, 2, "", "ERROR: Can't parse clamd configuration file")
+            return av.subprocess.CompletedProcess(args, 1, f"{args[-1]}/movie.mp4: Eicar-Test-Signature FOUND\n", "")
+
+        old_which, old_run = av.osutil.which, av._run
+        av.osutil.which, av._run = (lambda name: name), fake_run
+        try:
+            clam = av.ClamAV()
+            first, second = clam.scan(Path("dl")), clam.scan(Path("dl"))
+        finally:
+            av.osutil.which, av._run = old_which, old_run
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["threats"], [{"name": "Eicar-Test-Signature", "file": "dl/movie.mp4"}])
+        self.assertEqual(second, first)
+        self.assertEqual(runs, ["clamdscan", "clamscan", "clamscan"])   # clamdscan isn't retried
+
+
 @unittest.skipUnless(os.environ.get("BUZZ_AV_TEST") == "1" and av.Defender().available,
                      "set BUZZ_AV_TEST=1 to run the live Microsoft Defender test (writes the EICAR test file)")
 class DefenderLiveTest(unittest.TestCase):

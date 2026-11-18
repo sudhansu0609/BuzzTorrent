@@ -115,7 +115,10 @@ class ClamAV:
     name = "ClamAV"
 
     def __init__(self):
-        self.exe = osutil.which("clamdscan") or osutil.which("clamscan")     # incl. Homebrew on a Mac
+        # clamdscan is faster but needs the clamd service, which Homebrew installs without
+        # configuring or starting: when it can't reach clamd, fall back to clamscan
+        self.exes = [e for e in (osutil.which("clamdscan"), osutil.which("clamscan")) if e]
+        self.exe = self.exes[0] if self.exes else None
 
     @property
     def available(self) -> bool:
@@ -125,11 +128,17 @@ class ClamAV:
         return {"available": self.available, "enabled": self.available}
 
     def scan(self, path: Path, remediate: bool = False) -> dict:
-        try:
-            r = _run([self.exe, "--no-summary", "--infected", "-r", str(path)], SCAN_TIMEOUT)
-        except (OSError, subprocess.SubprocessError) as e:
-            return {"engine": self.name, "ok": False, "threats": [], "error": str(e)}
-        if r.returncode not in (0, 1):
+        while True:
+            try:
+                r = _run([self.exe, "--no-summary", "--infected", "-r", str(path)], SCAN_TIMEOUT)
+            except (OSError, subprocess.SubprocessError) as e:
+                return {"engine": self.name, "ok": False, "threats": [], "error": str(e)}
+            if r.returncode in (0, 1):
+                break
+            if self.exe != self.exes[-1]:   # clamdscan without a running clamd: use clamscan from now on
+                self.exes.remove(self.exe)
+                self.exe = self.exes[0]
+                continue
             return {"engine": self.name, "ok": False, "threats": [], "error": (r.stderr or r.stdout).strip()[:300]}
         threats = []
         for line in r.stdout.splitlines():
