@@ -15,6 +15,8 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.util.Log;
+import android.webkit.ConsoleMessage;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -91,15 +93,50 @@ public class MainActivity extends Activity {
         s.setSupportMultipleWindows(false);
         s.setUserAgentString(s.getUserAgentString() + " BuzzTorrentTV/1.0");
         CookieManager.getInstance().setAcceptCookie(true);
-        web.setWebChromeClient(new WebChromeClient());
+        web.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onConsoleMessage(ConsoleMessage m) {        // page errors show in `adb logcat -s BuzzTV`
+                Log.i("BuzzTV", m.messageLevel() + " " + m.message() + " (" + m.sourceId() + ":" + m.lineNumber() + ")");
+                return true;
+            }
+        });
         web.setWebViewClient(new Client());
         web.addJavascriptInterface(new Bridge(), "BuzzTV");
+        addBridges(web);
         setContentView(web);
         web.setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
         web.requestFocus();
         String server = prefs.getString("server", null);
-        web.loadUrl(server == null ? SETUP : server + "/tv");
+        open(server == null ? SETUP : server + "/tv");
+        if (server != null) {
+            // keep the PC ⇄ Mac list's details (which OS, the install's id) up to date
+            new Thread(() -> {
+                JSONObject info = Computers.hello(server);
+                if (info != null) Computers.remember(prefs, server, info);
+            }, "hello").start();
+        }
+    }
+
+    /** Extra JavaScript bridges for a subclass (the Quest app's VR rooms), added before any page loads. */
+    protected void addBridges(WebView web) {
+    }
+
+    /** True while the WebView shows the paired PC's page or the bundled setup page. */
+    protected boolean showingOurPage() {
+        return allowed(currentUrl);
+    }
+
+    /** Opens the full-screen player for a payload; the Quest VR app swaps in its cinema. */
+    protected Intent playerIntent(String payload) {
+        return new Intent(this, PlayerActivity.class).putExtra(PlayerActivity.EXTRA, payload);
+    }
+
+    /** Loads one of our pages. The bridge checks currentUrl, and a page's script can call it
+     *  before onPageStarted arrives (Meta Quest's WebView), so it's set here first. */
+    void open(String url) {
+        currentUrl = url;
+        web.loadUrl(url);
     }
 
     boolean allowed(String url) {
@@ -113,7 +150,10 @@ public class MainActivity extends Activity {
         @Override
         public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
             String url = req.getUrl().toString();
-            if (allowed(url)) return false;
+            if (allowed(url)) {
+                currentUrl = url;
+                return false;
+            }
             // Anything else (a web link) goes to whatever app handles it, never into this WebView.
             try {
                 startActivity(new Intent(Intent.ACTION_VIEW, req.getUrl()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
@@ -132,7 +172,7 @@ public class MainActivity extends Activity {
         public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
             if (req.isForMainFrame() && !req.getUrl().toString().startsWith(SETUP)) {
                 String server = prefs.getString("server", "");
-                view.loadUrl(SETUP + "?offline=" + Uri.encode(server));
+                open(SETUP + "?offline=" + Uri.encode(server));
             }
         }
     }
@@ -252,6 +292,20 @@ public class MainActivity extends Activity {
             return open != null && launch(open) ? "opened" : "none";
         }
 
+        /** Google TV's "search all my apps"; missing on Meta Quest and plain Android. */
+        @JavascriptInterface
+        public boolean canGlobalSearch() {
+            Intent i = new Intent("android.search.action.GLOBAL_SEARCH");
+            return fromOurPages() && getPackageManager().resolveActivity(i, 0) != null;
+        }
+
+        /** Opens an https page in the device's browser (Meta Quest has no Play Store to fall back on). */
+        @JavascriptInterface
+        public String openWeb(String url) {
+            if (!fromOurPages() || url == null || !url.startsWith("https://")) return "none";
+            return launch(new Intent(Intent.ACTION_VIEW, Uri.parse(url))) ? "ok" : "none";
+        }
+
         @JavascriptInterface
         public String globalSearch(String query) {
             if (!fromOurPages()) return "none";
@@ -265,9 +319,16 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String playNative(String payload) {
             if (!fromOurPages() || payload == null || payload.length() > 2_000_000) return "none";
-            Intent i = new Intent(MainActivity.this, PlayerActivity.class).putExtra(PlayerActivity.EXTRA, payload);
+            Intent i = playerIntent(payload);
             runOnUiThread(() -> startActivity(i));
             return "ok";
+        }
+
+        /** False where no speech recognizer is installed (e.g. Meta Quest): the page hides its 🎤 buttons. */
+        @JavascriptInterface
+        public boolean canVoice() {
+            Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            return fromOurPages() && getPackageManager().resolveActivity(i, 0) != null;
         }
 
         /** Voice search with the TV's own speech recognizer; the text comes back via onVoice(). */
@@ -333,7 +394,7 @@ public class MainActivity extends Activity {
                 return "none";
             }
             if (payload == null) return "none";
-            Intent i = new Intent(MainActivity.this, PlayerActivity.class).putExtra(PlayerActivity.EXTRA, payload);
+            Intent i = playerIntent(payload);
             runOnUiThread(() -> startActivity(i));
             return "ok";
         }
@@ -371,11 +432,43 @@ public class MainActivity extends Activity {
             return "none";
         }
 
+        /** "Choose another PC": the setup page, with the saved computers and a network search. */
         @JavascriptInterface
         public void resetServer() {
             if (!fromOurPages()) return;
-            prefs.edit().remove("server").apply();
-            runOnUiThread(() -> web.loadUrl(SETUP));
+            runOnUiThread(() -> open(SETUP + "?pick=1"));
+        }
+
+        /** The PC ⇄ Mac toggle: {"active": url, "list": [{url, os, id}]}. */
+        @JavascriptInterface
+        public String computers() {
+            return fromOurPages() ? Computers.json(prefs) : "{}";
+        }
+
+        /** Switches to another saved (already trusted) computer: "ok", "offline" or "bad". */
+        @JavascriptInterface
+        public String switchTo(String url) {
+            if (!fromOurPages() || url == null || !SERVER.matcher(url).matches() || !Computers.known(prefs, url)) return "bad";
+            JSONObject info = Computers.hello(url);
+            if (info == null) return "offline";
+            Computers.remember(prefs, url, info);
+            prefs.edit().putString("server", url).apply();
+            runOnUiThread(() -> open(url + "/tv"));
+            return "ok";
+        }
+
+        /** Pair with one more computer (the toggle's "＋ Mac"): the setup page's search. */
+        @JavascriptInterface
+        public void addComputer() {
+            if (!fromOurPages()) return;
+            runOnUiThread(() -> open(SETUP + "?pick=1"));
+        }
+
+        /** The setup page's ✕ next to a saved computer. */
+        @JavascriptInterface
+        public void forgetComputer(String url) {
+            if (!currentUrl.startsWith(SETUP) || url == null) return;
+            Computers.forget(prefs, url);
         }
 
         @JavascriptInterface
@@ -387,8 +480,9 @@ public class MainActivity extends Activity {
         public boolean setServer(String url) {
             // Only the bundled setup page may change which PC this app trusts.
             if (!currentUrl.startsWith(SETUP) || url == null || !SERVER.matcher(url).matches()) return false;
+            Computers.remember(prefs, url, Computers.hello(url));
             prefs.edit().putString("server", url).apply();
-            runOnUiThread(() -> web.loadUrl(url + "/tv"));
+            runOnUiThread(() -> open(url + "/tv"));
             return true;
         }
 
@@ -396,8 +490,7 @@ public class MainActivity extends Activity {
         public void startDiscover() {
             if (!currentUrl.startsWith(SETUP)) return;
             new Thread(() -> {
-                List<String> found = discover();
-                JSONArray a = new JSONArray(found);
+                JSONArray a = new JSONArray(discover());
                 runOnUiThread(() -> web.evaluateJavascript("window.onDiscover && onDiscover(" + a + ")", null));
             }, "discover").start();
         }
@@ -409,8 +502,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Finds BuzzTorrent servers on this TV's /24 network(s). */
-    List<String> discover() {
+    /** Finds BuzzTorrent servers on this TV's /24 network(s): their hello answers plus "url". */
+    List<JSONObject> discover() {
         Set<String> prefixes = new LinkedHashSet<>();
         try {
             for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
@@ -425,7 +518,7 @@ public class MainActivity extends Activity {
             }
         } catch (Exception ignored) {
         }
-        final List<String> found = Collections.synchronizedList(new ArrayList<>());
+        final List<JSONObject> found = Collections.synchronizedList(new ArrayList<>());
         ExecutorService pool = Executors.newFixedThreadPool(48);
         for (String prefix : prefixes) {
             for (int i = 1; i < 255; i++) {
@@ -437,7 +530,14 @@ public class MainActivity extends Activity {
                         return;
                     }
                     String url = "http://" + host + ":" + PORT;
-                    if (hello(url)) found.add(url);
+                    JSONObject info = Computers.hello(url);
+                    if (info == null) return;
+                    JSONObject o = new JSONObject();
+                    try {
+                        o.put("url", url).put("os", info.optString("os", "")).put("id", info.optString("id", ""));
+                    } catch (Exception ignored) {
+                    }
+                    found.add(o);
                 });
             }
         }
@@ -446,26 +546,13 @@ public class MainActivity extends Activity {
             pool.awaitTermination(15, TimeUnit.SECONDS);
         } catch (InterruptedException ignored) {
         }
-        return new ArrayList<>(found);
+        Log.i("BuzzTV", "discover: networks " + prefixes + ", found " + found);
+        List<JSONObject> out = new ArrayList<>(found);
+        Collections.sort(out, (x, y) -> x.optString("url").compareTo(y.optString("url")));
+        return out;
     }
 
     static boolean hello(String base) {
-        HttpURLConnection c = null;
-        try {
-            c = (HttpURLConnection) new URL(base + "/api/tv/hello").openConnection();
-            c.setConnectTimeout(1500);
-            c.setReadTimeout(2500);
-            if (c.getResponseCode() != 200) return false;
-            InputStream in = c.getInputStream();
-            ByteArrayOutputStream buf = new ByteArrayOutputStream();
-            byte[] b = new byte[2048];
-            int n;
-            while ((n = in.read(b)) > 0 && buf.size() < 8192) buf.write(b, 0, n);
-            return "BuzzTorrent".equals(new JSONObject(buf.toString("UTF-8")).optString("app"));
-        } catch (Exception e) {
-            return false;
-        } finally {
-            if (c != null) c.disconnect();
-        }
+        return Computers.hello(base) != null;
     }
 }

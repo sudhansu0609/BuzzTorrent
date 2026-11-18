@@ -42,6 +42,13 @@ button { cursor: pointer; }
 .tabs .chip { height: 2.6rem; font-size: 1.05rem; font-weight: 600; }
 .chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .chip[aria-pressed="true"]:focus { color: var(--accent-ink); }
+/* PC ⇄ Mac toggle in the header: the computer in use is lit */
+.hostswitch { display: flex; gap: .3rem; padding: .25rem; border-radius: 2rem; border: .12rem solid var(--line);
+  background: var(--bg); flex: none; }
+.hostswitch .chip { height: 2.2rem; border-color: transparent; }
+.hostswitch .chip[aria-pressed="true"] { background: var(--surface); border-color: var(--accent); color: var(--accent); }
+.hostswitch .chip[aria-pressed="true"]:focus, .hostswitch .chip:focus { background: var(--accent); color: var(--accent-ink); }
+.hostswitch .add { color: var(--text-2); }
 
 main { padding-top: .8rem; padding-bottom: 3rem; }
 .row { margin-top: 1rem; }
@@ -168,6 +175,7 @@ main { padding-top: .8rem; padding-bottom: 3rem; }
   background: rgba(255, 255, 255, .25); overflow: hidden; }
 .cw-fill { display: block; height: 100%; background: var(--accent); }
 .badge.new { color: var(--accent-ink); background: var(--accent); }
+.badge.like { left: auto; right: .45rem; color: #ff5c7a; font-size: .9rem; }
 .badge.safe { color: var(--safe); }
 #library .grid { grid-template-columns: repeat(5, 1fr); }
 .ott .free { color: var(--safe); margin-left: .4rem; font-size: .75rem; }
@@ -176,3 +184,44 @@ main { padding-top: .8rem; padding-bottom: 3rem; }
 /* filters + PC downloads */
 .filters { padding: .2rem 0 .4rem; }
 #downloads .d-h { margin-top: 1.2rem; }
+
+.d-flags li.how { color: var(--info); }
+body.locked { overflow: hidden; }
+.genres { padding-top: .2rem; }
+.genres .chip { height: 2.1rem; font-size: .9rem; }
+
+/* Long torrent names ("The.Straight.Story.1999.2160p…") have no spaces to wrap at: without these,
+   one of them stretches the results grid past the edge of the screen. */
+.grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.card, .p-item span, .d-body, .dl-main { min-width: 0; }
+.card-t, .d-body h1, .p-item span:first-child, #sTitle, .toast, .d-flags li { overflow-wrap: anywhere; }
+.p-item span:last-child { flex: none; }
+
+/* search history */
+.recent { margin-top: .6rem; }
+.recent .dym { padding: .3rem 0; }
+.recent .chip.clear { color: var(--text-3); }
+.recent .chip.clear:focus { color: #fff; background: var(--danger); border-color: var(--danger); }
+.more { display: flex; justify-content: center; padding: .4rem 0 1rem; }
+
+/* streaming */
+.s-stage { font-size: 1.3rem; margin: .2rem 0 .6rem; }
+.s-bar { height: .5rem; max-width: 50rem; }
+.s-bar .dl-fill { transition: width .4s; }
+#sStats { margin-top: .6rem; }
+.grid .card { align-self: start; }
+.thumb .ph { overflow-wrap: anywhere; }
+.d-cast { display: flex; flex-direction: column; gap: .3rem; color: var(--text-2); font-size: .95rem; max-width: 46rem; margin: .6rem 0 0; }
+.d-cast b { color: var(--text); font-weight: 600; }
+.d-summary { -webkit-line-clamp: 7; }
+#sSubs { margin-top: .4rem; }
+
+/* pointer devices (Meta Quest controllers or hands, touch, mouse) */
+.back-fab { display: none; position: fixed; top: 1rem; left: 1.2rem; z-index: 30; font-weight: 600; }
+body.pointer.locked .back-fab { display: block; }
+#pair:not([hidden]) ~ .back-fab { display: none; }
+body.pointer .overlay:not(.player) { padding-top: 3.4rem; }
+/* Desk density for pointers (Quest panel, mouse): the 10-foot TV sizes shrink so a window shows
+   about as much as the PC page does */
+html.pointer { font-size: calc(100vw / 96); }
+html.pointer .grid, html.pointer #library .grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }

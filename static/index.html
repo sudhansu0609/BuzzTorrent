@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-host="PC">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -78,8 +78,11 @@
     <button class="btn btn-ghost btn-sm browse-btn" id="browseBtn" type="button" title="Browse popular picks by category">
       <svg><use href="#i-all"/></svg><span>Browse</span>
     </button>
-    <button class="btn btn-ghost btn-sm browse-btn" id="libraryBtn" type="button" title="Videos on this PC, ready to play">
-      <svg><use href="#i-folder"/></svg><span>My PC</span>
+    <button class="btn btn-ghost btn-sm browse-btn" id="forYouBtn" type="button" title="Picks based on the titles you liked">
+      <span>♥ For you</span>
+    </button>
+    <button class="btn btn-ghost btn-sm browse-btn" id="libraryBtn" type="button" title="Videos on this computer, ready to play">
+      <svg><use href="#i-folder"/></svg><span>My <span class="pc">PC</span></span>
     </button>
     <button class="icon-btn scanner-btn" id="downloadsBtn" type="button" aria-label="Downloads" title="Downloads">
       <svg><use href="#i-download"/></svg><span class="badge-dot dl-count" id="dlBadge" hidden></span>
@@ -122,6 +125,7 @@
   </section>
 
   <section class="discover" id="personal" aria-label="Continue watching, your watchlist and classics"></section>
+  <section class="discover" id="foryou" aria-label="Picks for you"></section>
   <section class="discover" id="discover" aria-label="Popular picks"></section>
 
   <section class="features" aria-label="Built-in protection">
@@ -149,7 +153,7 @@
       <div class="feature-icon"><svg><use href="#i-safe"/></svg></div>
       <div>
         <h3>Download scanner</h3>
-        <p>After a download finishes, Microsoft Defender scans the real files, and BuzzTorrent checks what each file actually is (not just its name). It looks inside archives for programs and password locks and quarantines threats.</p>
+        <p>After a download finishes, <span data-mac="ClamAV">Microsoft Defender</span> scans the real files, and BuzzTorrent checks what each file actually is (not just its name). It looks inside archives for programs and password locks and quarantines threats.</p>
       </div>
       <button type="button" class="btn btn-ghost" id="featureScanner">Set it up</button>
     </article>
@@ -257,10 +261,10 @@
 <!-- ========================= DOWNLOAD SCANNER ======================= -->
 <main id="libraryView" class="scan-view" hidden>
   <div class="scan-list-head">
-    <h2>On this PC</h2>
+    <h2>On this <span class="pc">PC</span></h2>
     <span class="muted small" id="libSummary"></span>
   </div>
-  <p class="muted small">Videos BuzzTorrent downloaded and the virus scanner checked as clean. Play them here, or on the TV under My PC.</p>
+  <p class="muted small">Videos BuzzTorrent downloaded and the virus scanner checked as clean. Play them here, or on the TV under My <span class="pc">PC</span>.</p>
   <div id="libBusy"></div>
   <ul class="pick-grid lib-grid" id="libGrid"></ul>
 </main>
@@ -471,18 +475,18 @@
       <h3>Living-room TV</h3>
       <div class="set-row">
         <div><div>TV access</div><div class="muted small">Use BuzzTorrent on your Google TV over your home Wi-Fi. A paired TV can
-          search, browse, play free videos and start downloads here. Settings and the scanner stay on this PC only.</div></div>
+          search, browse, play free videos and start downloads here. Settings and the scanner stay on this <span class="pc">PC</span> only.</div></div>
         <label class="switch"><input type="checkbox" id="setTv"><span></span><span class="sr-only">TV access</span></label>
       </div>
       <div id="tvBox" hidden>
         <div class="tv-pin-row">
           <div><div class="muted small">PIN to pair a TV</div><div class="tv-pin" id="tvPin">------</div></div>
-          <div><div class="muted small">This PC's address</div><div class="tv-addr" id="tvAddr">…</div></div>
+          <div><div class="muted small">This <span class="pc">PC</span>'s address</div><div class="tv-addr" id="tvAddr">…</div></div>
         </div>
         <p class="muted small" id="tvState"></p>
         <div class="set-row">
-          <div><div>Start with the computer</div><div class="muted small">Runs quietly in the background so the TV works whenever the PC is on.</div></div>
-          <label class="switch"><input type="checkbox" id="setTvAuto"><span></span><span class="sr-only">Start with Windows</span></label>
+          <div><div>Start with the computer</div><div class="muted small">Runs quietly in the background so the TV works whenever the <span class="pc">PC</span> is on.</div></div>
+          <label class="switch"><input type="checkbox" id="setTvAuto"><span></span><span class="sr-only" data-mac="Start at login">Start with Windows</span></label>
         </div>
         <div class="row-btns">
           <button type="button" class="btn btn-ghost btn-sm" id="tvFirewall" hidden>Allow through Windows Firewall</button>
@@ -496,7 +500,7 @@
               <li>On the TV, install <b>Downloader</b> (by AFTVnews) from the Play Store.</li>
               <li>TV Settings → <b>Apps</b> → <b>Security &amp; restrictions</b> → <b>Unknown sources</b> → allow <b>Downloader</b>.</li>
               <li>In Downloader, type <code id="tvApkUrl">http://…/BuzzTorrentTV.apk</code> and choose <b>Install</b>.</li>
-              <li>Open <b>BuzzTorrent</b> from the TV's Apps row. It finds this PC by itself; enter the PIN above.</li>
+              <li>Open <b>BuzzTorrent</b> from the TV's Apps row. It finds this <span class="pc">PC</span> by itself; enter the PIN above.</li>
             </ol>
             <b>Or with a pen drive:</b> run <code>python android\build_apk.py --usb</code> with the pen drive plugged in,
             plug it into the TV, and open <code>BuzzTorrentTV-….apk</code> with a file manager app (e.g. <i>File Commander</i>
@@ -541,6 +545,7 @@
       <b id="pcpTitle" dir="auto"></b>
       <label class="pcp-sel">Quality <select id="pcpQuality"></select></label>
       <label class="pcp-sel">Subtitles <select id="pcpSubs"></select></label>
+      <button type="button" class="btn btn-ghost btn-sm" id="pcpLike" hidden title="Like it and get picks like it under ♥ For you">♡ Like</button>
       <button type="button" class="btn btn-ghost btn-sm" id="pcpRestart" hidden>↺ Start over</button>
       <button type="button" class="btn btn-ghost btn-sm" id="pcpExternal" hidden>Open in video player</button>
       <button type="button" class="icon-btn" id="pcpClose" aria-label="Close player"><svg><use href="#i-x"/></svg></button>
@@ -570,6 +575,7 @@
           <button class="btn btn-primary act-play" type="button" hidden>▶ Play</button>
           <button class="btn btn-primary act-get" type="button"><svg><use href="#i-download"/></svg><span>Download</span></button>
           <button class="btn btn-ghost act-watch" type="button" hidden>☆ Watchlist</button>
+          <button class="btn btn-ghost act-like" type="button" hidden title="Like it and get picks like it under ♥ For you">♡ Like</button>
           <a class="btn btn-ghost act-open"><svg><use href="#i-magnet"/></svg><span>Open magnet</span></a>
           <button class="btn btn-ghost act-copy" type="button"><svg><use href="#i-copy"/></svg>Copy</button>
           <a class="btn btn-ghost act-dl"><svg><use href="#i-download"/></svg>.torrent</a>

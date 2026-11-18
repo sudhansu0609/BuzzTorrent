@@ -15,13 +15,18 @@
   .logo { width: 4rem; height: 4rem; border-radius: 1rem; background: var(--accent); display: inline-grid; place-items: center; }
   .logo svg { width: 2.6rem; height: 2.6rem; }
   h1 { font-size: 2rem; margin: .8rem 0 .3rem; }
+  h2 { font-size: .9rem; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .06em;
+    margin: .5rem 0 0; text-align: left; }
   p { color: var(--text-2); margin: .3rem 0; }
-  .list { display: flex; flex-direction: column; gap: .6rem; margin: 1.4rem auto; width: 26rem; }
+  .list { display: flex; flex-direction: column; gap: .6rem; margin: 1.4rem auto; width: 28rem; }
   button, input { font: inherit; color: inherit; height: 3rem; border-radius: 1.5rem; border: .12rem solid var(--line);
     background: var(--surface); padding: 0 1.3rem; font-size: 1.1rem; }
   button:focus, input:focus { outline: none; background: var(--accent); color: var(--ink); border-color: var(--accent); }
   input:focus { background: var(--surface); color: var(--text); }
-  .row { display: flex; gap: .6rem; } .row input { flex: 1; min-width: 0; }
+  .row { display: flex; gap: .6rem; } .row input, .row > button:first-child { flex: 1; min-width: 0; }
+  .row .x { flex: none; width: 3rem; padding: 0; }
+  .on { border-color: var(--accent); }
+  .tag { font-size: .85rem; opacity: .75; margin-left: .5rem; }
   .err { color: var(--danger); min-height: 1.5rem; }
   .spin { display: inline-block; width: 1.2rem; height: 1.2rem; border: .2rem solid var(--line); border-top-color: var(--accent);
     border-radius: 50%; animation: s .8s linear infinite; vertical-align: -.2rem; margin-right: .5rem; }
@@ -32,12 +37,13 @@
 <body>
 <main>
   <div class="logo"><svg viewBox="0 0 32 32"><path d="M17.5 5 8 18h7l-1.5 9L24 14h-7l.5-9z" fill="#1a1300"/></svg></div>
-  <h1 id="title">Connect to your PC</h1>
+  <h1 id="title">Connect to your computer</h1>
   <p id="lead">Looking for BuzzTorrent on your home network…</p>
   <div class="list" id="list"></div>
   <p class="err" id="err" role="alert"></p>
-  <p><small>On the PC: BuzzTorrent → Settings → Living-room TV → turn on TV access.<br>
-    The PC and this TV must be on the same Wi-Fi.</small></p>
+  <p><small>On your PC or Mac: BuzzTorrent → Settings → Living-room TV → turn on TV access.<br>
+    The computer and this device must be on the same Wi-Fi. Pair once with each computer,<br>
+    then switch with the 🖥 PC / 💻 Mac toggle at the top of BuzzTorrent.</small></p>
 </main>
 <script>
 "use strict";
@@ -46,6 +52,9 @@ const list = document.getElementById("list");
 const err = document.getElementById("err");
 const params = new URLSearchParams(location.search);
 const offline = params.get("offline");
+const OS_NAME = { mac: "Mac", windows: "PC", linux: "PC" };
+const OS_ICON = { mac: "💻", windows: "🖥", linux: "🖥" };
+let found = null;                       // what the network search found; null while it runs
 
 function el(tag, attrs, text) {
   const e = document.createElement(tag);
@@ -53,59 +62,109 @@ function el(tag, attrs, text) {
   if (text) e.textContent = text;
   return e;
 }
+const addr = (url) => url.replace("http://", "").replace(":8765", "");
+const nameOf = (c) => OS_NAME[c && c.os] || "computer";
+function savedComputers() {
+  try {
+    const c = JSON.parse(B.computers ? B.computers() : "{}");
+    return { active: c.active || "", list: Array.isArray(c.list) ? c.list : [] };
+  } catch (e) { return { active: "", list: [] }; }
+}
 function connect(url) {
   err.textContent = "";
-  if (B.check(url) !== "ok") { err.textContent = "BuzzTorrent didn't answer at " + url.replace("http://", "") + ". Is TV access on?"; return; }
+  if (B.check(url) !== "ok") { err.textContent = "BuzzTorrent didn't answer at " + addr(url) + ". Is it running there, with TV access on?"; return; }
   B.setServer(url);
 }
 function manualRow() {
   const row = el("div", { class: "row" });
-  const input = el("input", { type: "text", inputmode: "decimal", placeholder: "PC address, e.g. 192.168.1.9", "aria-label": "PC address" });
+  const input = el("input", { type: "text", inputmode: "decimal", placeholder: "Computer's address, e.g. 192.168.1.9", "aria-label": "Computer's address" });
   const go = el("button", { type: "button" }, "Connect");
   go.onclick = () => {
     let v = input.value.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
     if (!/:\d+$/.test(v)) v += ":8765";
-    if (!/^(\d{1,3}\.){3}\d{1,3}:\d{1,5}$/.test(v)) { err.textContent = "Type the PC's address shown in BuzzTorrent settings, like 192.168.1.9"; return; }
+    if (!/^(\d{1,3}\.){3}\d{1,3}:\d{1,5}$/.test(v)) { err.textContent = "Type the address shown in BuzzTorrent's settings, like 192.168.1.9"; return; }
     connect("http://" + v);
   };
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") go.click(); });
   row.append(input, go);
   return row;
 }
-function scanButton(label) {
-  const b = el("button", { type: "button" }, label);
-  b.onclick = scan;
-  return b;
-}
-function render(found) {
+function render() {
+  const saved = savedComputers();
+  const offlineC = offline && saved.list.find((c) => c.url === offline);
   list.replaceChildren();
   if (offline) {
-    document.getElementById("title").textContent = "Can't reach your PC";
-    document.getElementById("lead").textContent = "BuzzTorrent at " + offline.replace("http://", "") + " didn't answer. Is the PC on?";
+    document.getElementById("title").textContent = "Can't reach your " + nameOf(offlineC);
+    document.getElementById("lead").textContent = "BuzzTorrent at " + addr(offline) + " didn't answer. Is the " +
+      nameOf(offlineC) + " on, and on this Wi-Fi?";
     const retry = el("button", { type: "button" }, "Try again");
     retry.onclick = () => connect(offline);
     list.append(retry);
   } else {
-    document.getElementById("lead").textContent = found.length
-      ? "Found BuzzTorrent. Choose your PC:" : "Couldn't find BuzzTorrent automatically. Type the PC's address:";
+    document.getElementById("title").textContent = saved.list.length ? "Choose a computer" : "Connect to your computer";
+    document.getElementById("lead").textContent = found === null ? "Looking for BuzzTorrent on your home network…"
+      : found.length || saved.list.length ? "Choose the computer to use:"
+      : "Couldn't find BuzzTorrent automatically. Type the computer's address:";
   }
-  for (const url of found) {
-    const b = el("button", { type: "button" }, "PC at " + url.replace("http://", "").replace(":8765", ""));
-    b.onclick = () => connect(url);
+  // Your computers: the PC ⇄ Mac list (each one keeps its pairing)
+  const here = new Set((found || []).map((f) => f.url));
+  const others = saved.list.filter((c) => c.url !== offline);
+  if (others.length) list.append(el("h2", {}, offline ? "Switch to" : "Your computers"));
+  for (const c of others) {
+    const row = el("div", { class: "row" });
+    const b = el("button", { type: "button", class: c.url === saved.active ? "on" : "" },
+      (OS_ICON[c.os] || "🖥") + " " + (OS_NAME[c.os] || "Computer") + " · " + addr(c.url));
+    if (found !== null) b.append(el("span", { class: "tag" }, here.has(c.url) ? "on this Wi-Fi" : "not found here"));
+    b.onclick = () => connect(c.url);
+    const x = el("button", { type: "button", class: "x", "aria-label": "Forget " + addr(c.url), title: "Forget" }, "✕");
+    x.onclick = () => { if (B.forgetComputer) B.forgetComputer(c.url); render(); };
+    row.append(b, x);
+    list.append(row);
+  }
+  // Found on this network and not saved yet (or saved, but now at another address)
+  const byId = new Map(saved.list.filter((c) => c.id).map((c) => [c.id, c]));
+  const fresh = (found || []).filter((f) => !saved.list.some((c) => c.url === f.url));
+  if (fresh.length) list.append(el("h2", {}, "Found on this network"));
+  for (const f of fresh) {
+    const moved = f.id && byId.get(f.id);
+    const b = el("button", { type: "button" }, (OS_ICON[f.os] || "🖥") + " " + (OS_NAME[f.os] || "BuzzTorrent") + " at " + addr(f.url));
+    if (moved) b.append(el("span", { class: "tag" }, "your " + nameOf(moved) + ", new address"));
+    b.onclick = () => connect(f.url);
     list.append(b);
   }
-  list.append(manualRow(), scanButton(found.length || offline ? "Search the network again" : "Search again"));
-  list.querySelector("button, input").focus();
+  if (found === null) {
+    const p = el("p", {});
+    p.innerHTML = '<span class="spin"></span>Searching your network…';
+    list.append(p);
+  } else {
+    const again = el("button", { type: "button" }, "Search the network again");
+    again.onclick = scan;
+    list.append(again);
+  }
+  list.append(manualRow());
+  const first = list.querySelector("button, input");
+  if (first && !list.contains(document.activeElement)) first.focus();
 }
 function scan() {
   err.textContent = "";
-  list.replaceChildren(el("p", {}, ""));
-  list.firstChild.innerHTML = '<span class="spin"></span>Searching your network…';
+  found = null;
+  render();
   B.startDiscover();
 }
-window.onDiscover = (found) => {
-  if (found.length === 1 && !offline && !params.has("pick")) { connect(found[0]); return; }
-  render(found);
+window.onDiscover = (res) => {
+  // older app builds sent bare URLs
+  found = (res || []).map((f) => (typeof f === "string" ? { url: f, os: "", id: "" } : f));
+  render();
+  const saved = savedComputers();
+  if (offline) {
+    // the same computer at a new address (the router handed it another IP): carry on there
+    const id = (saved.list.find((c) => c.url === offline) || {}).id;
+    const moved = id && found.find((f) => f.id === id && f.url !== offline);
+    if (moved) connect(moved.url);
+    return;
+  }
+  // First time, one BuzzTorrent on the network: connect straight away
+  if (found.length === 1 && !saved.list.length && !params.has("pick")) connect(found[0].url);
 };
 document.addEventListener("keydown", (e) => {
   const items = [...list.querySelectorAll("button, input")];
@@ -117,10 +176,10 @@ document.addEventListener("keydown", (e) => {
     if (next) next.focus();
   } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && !(t.tagName === "INPUT" && t.value)) {
     const row = t.closest(".row");
-    if (row) { e.preventDefault(); row.children[e.key === "ArrowRight" ? 1 : 0].focus(); }
+    if (row) { e.preventDefault(); row.children[e.key === "ArrowRight" ? row.children.length - 1 : 0].focus(); }
   }
 });
-if (offline) render([]); else scan();
+scan();
 </script>
 </body>
 </html>

@@ -242,8 +242,8 @@ kbd { font-family: var(--mono); font-size: 11px; color: var(--text-3); border: 1
 .pill-warn { background: var(--caution-soft); color: var(--caution); }
 .pill-info { background: var(--info-soft); color: var(--info); }
 .pill-safe { background: var(--safe-soft); color: var(--safe); }
-.card-actions { grid-area: actions; display: flex; align-items: center; gap: 2px; }
-.card-actions .btn { margin-right: 6px; }
+.card-actions { grid-area: actions; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+.card-actions .btn { white-space: nowrap; flex: none; }
 .scan-panel { grid-area: scan; margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--line-strong); }
 .scan-summary { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; margin-bottom: 8px; flex-wrap: wrap; }
 .scan-summary.ok { color: var(--safe); } .scan-summary.bad { color: var(--danger); } .scan-summary.neutral { color: var(--text-2); }
@@ -497,6 +497,9 @@ kbd { font-family: var(--mono); font-size: 11px; color: var(--text-3); border: 1
 :root[data-theme="light"] .shelf-head h2 svg { color: #a77700; }
 .shelf-head .link.small { margin: 0; }
 .shelf-error { color: var(--text-3); font-size: 14px; }
+#foryou .shelf-error { margin: 0; display: flex; align-items: center; gap: 8px; }
+#foryou .pick-meta span:last-child { color: var(--text-2); }
+.act-like, #pcpLike { white-space: nowrap; }
 
 .browse-view { max-width: 1280px; margin: 0 auto; padding: 26px 20px 60px; }
 .browse-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
@@ -537,8 +540,8 @@ kbd { font-family: var(--mono); font-size: 11px; color: var(--text-3); border: 1
 .pick-meta { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 12px; color: var(--text-3); }
 .pick-meta span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .pick-meta svg { width: 12px; height: 12px; }
-.pick-actions { display: flex; align-items: center; gap: 2px; padding: 6px 8px 10px 12px; }
-.pick-actions .btn { flex: 1; min-width: 0; margin-right: 4px; height: 32px; }
+.pick-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px 10px 12px; }
+.pick-actions .btn { flex: 1 1 auto; white-space: nowrap; padding: 0 10px; height: 32px; }
 .pick-actions .icon-btn { width: 32px; height: 32px; }
 .pick.skeleton { cursor: default; pointer-events: none; }
 .pick.skeleton .pick-thumb { animation: shimmer 1.3s ease infinite;

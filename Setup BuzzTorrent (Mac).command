@@ -8,6 +8,7 @@
 #    Python 3        runs BuzzTorrent
 #    aria2           BuzzTorrent's built-in torrent downloader
 #    ClamAV          virus scan of every finished download (+ its virus database)
+#    Google Chrome   only if no Chrome/Edge/Brave: shows BuzzTorrent in its own app window
 #    VLC             optional: plays every video format
 #    Jackett         optional: more torrent sites (you choose which)
 #  Then adds BuzzTorrent to your Applications folder and starts it.
@@ -34,7 +35,7 @@ fi
 ok "macOS $(sw_vers -productVersion) on $(uname -m)"
 
 # ---- Homebrew ---------------------------------------------------------------
-bold "1/7  Homebrew (installs the free tools below)"
+bold "1/8  Homebrew (installs the free tools below)"
 for d in /opt/homebrew/bin /usr/local/bin; do
   [ -x "$d/brew" ] && eval "$("$d/brew" shellenv)"
 done
@@ -60,7 +61,7 @@ fi
 HAVE_BREW=0; command -v brew >/dev/null 2>&1 && HAVE_BREW=1
 
 # ---- Python -----------------------------------------------------------------
-bold "2/7  Python 3.10 or newer"
+bold "2/8  Python 3.10 or newer"
 find_python() {
   for c in python3 python3.13 python3.12 python3.11 python3.10 \
            /Library/Frameworks/Python.framework/Versions/Current/bin/python3; do
@@ -82,7 +83,7 @@ fi
 ok "$("$PY" --version) at $PY"
 
 # ---- aria2 ------------------------------------------------------------------
-bold "3/7  aria2: the built-in torrent downloader"
+bold "3/8  aria2: the built-in torrent downloader"
 if command -v aria2c >/dev/null 2>&1; then
   ok "aria2 $(aria2c --version | head -1 | awk '{print $3}')"
 elif [ "$HAVE_BREW" = 1 ] && ask "Install aria2 (so BuzzTorrent downloads torrents itself)?"; then
@@ -92,7 +93,7 @@ else
 fi
 
 # ---- ClamAV -----------------------------------------------------------------
-bold "4/7  ClamAV: virus scan of every download"
+bold "4/8  ClamAV: virus scan of every download"
 if ! command -v clamscan >/dev/null 2>&1 && [ "$HAVE_BREW" = 1 ]; then
   if ask "Install ClamAV (free antivirus, takes a few minutes)?"; then brew install clamav; fi
 fi
@@ -109,7 +110,7 @@ else
 fi
 
 # ---- VLC (optional) ---------------------------------------------------------
-bold "5/7  VLC (optional): plays every video format"
+bold "5/8  VLC (optional): plays every video format"
 if [ -d "/Applications/VLC.app" ] || [ -d "$HOME/Applications/VLC.app" ]; then
   ok "VLC"
 elif [ "$HAVE_BREW" = 1 ] && askn "Install VLC (for MKV and other formats the app window can't play)?"; then
@@ -118,8 +119,24 @@ else
   note "Skipped: videos the app window can't play open in QuickTime instead."
 fi
 
+# ---- App window browser -----------------------------------------------------
+bold "6/8  A browser for BuzzTorrent's own window"
+BROWSER=""
+for app in "Google Chrome" "Microsoft Edge" "Brave Browser" "Chromium"; do
+  for base in /Applications "$HOME/Applications"; do
+    [ -z "$BROWSER" ] && [ -d "$base/$app.app" ] && BROWSER="$app"
+  done
+done
+if [ -n "$BROWSER" ]; then
+  ok "$BROWSER (BuzzTorrent opens in its own window, and quits when you close it)"
+elif [ "$HAVE_BREW" = 1 ] && ask "Install Google Chrome, so BuzzTorrent gets its own app window?"; then
+  brew install --cask google-chrome && ok "Google Chrome installed"
+else
+  note "Skipped: BuzzTorrent opens as a Safari tab instead (quit it with Stop BuzzTorrent.command)."
+fi
+
 # ---- Jackett (optional) -----------------------------------------------------
-bold "6/7  Jackett (optional): more torrent sites"
+bold "7/8  Jackett (optional): more torrent sites"
 note "Without it, BuzzTorrent searches the Internet Archive (free, legal films, music, books)."
 note "With it, you choose torrent sites; what you download from them, and whether that's legal where you live, is up to you."
 if [ "$HAVE_BREW" = 1 ] && askn "Install Jackett and connect it to BuzzTorrent?"; then
@@ -133,7 +150,7 @@ if [ "$HAVE_BREW" = 1 ] && askn "Install Jackett and connect it to BuzzTorrent?"
 fi
 
 # ---- App + start ------------------------------------------------------------
-bold "7/7  BuzzTorrent app"
+bold "8/8  BuzzTorrent app"
 mkdir -p data
 date > data/mac-setup-asked          # so Start BuzzTorrent doesn't ask these questions again
 if "$PY" app.py --install-shortcuts >/dev/null 2>&1; then
@@ -143,11 +160,24 @@ else
 fi
 chmod +x "Start BuzzTorrent.command" "Stop BuzzTorrent.command" 2>/dev/null
 
+note "Your TV app and VR headset (BuzzTorrent VR on Meta Quest) can use BuzzTorrent on this Mac"
+note "over the home Wi-Fi, after pairing once with a PIN."
+if ask "Turn on TV / VR headset access on this Mac?"; then
+  if askn "Also start BuzzTorrent in the background when you log in (so the headset always finds this Mac)?"; then
+    "$PY" app.py --enable-tv --tv-autostart
+  else
+    "$PY" app.py --enable-tv
+  fi
+  note "If macOS asks whether \"python3\" may accept incoming network connections, click Allow."
+fi
+
 if ask "Start BuzzTorrent now?"; then
   nohup "$PY" launcher.pyw >/dev/null 2>&1 &
   ok "BuzzTorrent is starting in its own window."
 fi
 bold "Done."
 note "Next time, open BuzzTorrent from Launchpad / Spotlight / your Applications folder."
-note "Living-room TV: BuzzTorrent > Settings > Living-room TV."
+note "TV or VR headset: BuzzTorrent > Settings > Living-room TV > turn on TV access."
+note "  On the headset, pair once with this Mac (Choose another PC / + Mac), then switch"
+note "  between your PC and this Mac with the PC / Mac toggle at the top of BuzzTorrent."
 finish 0

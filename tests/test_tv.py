@@ -169,6 +169,43 @@ class TvDetectionTests(unittest.TestCase):
         self.assertFalse(looks_tv({"title": "Mars2 Rover footage"}))
 
 
+class InstanceIdTests(unittest.TestCase):
+    def test_id_is_random_once_then_kept_in_data(self):
+        import tempfile
+        from pathlib import Path
+        old_root, old = app.ROOT, dict(app._instance)
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                app.ROOT, app._instance = Path(d), {}
+                first = app.instance_id()
+                self.assertRegex(first, r"^[0-9a-f]{12}$")
+                self.assertEqual((Path(d) / "data" / "instance-id").read_text(), first)
+                app._instance = {}
+                self.assertEqual(app.instance_id(), first)          # same after a restart
+            finally:
+                app.ROOT, app._instance = old_root, old
+
+
+class EnableTvTests(unittest.TestCase):
+    def test_enable_tv_turns_tv_access_on_with_a_pin(self):
+        import contextlib
+        import io
+        import tempfile
+        from pathlib import Path
+        old = app.CONFIG
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                app.CONFIG = Path(d) / "config.json"
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(app.main(["--enable-tv"]), 0)
+                cfg = json.loads(app.CONFIG.read_text(encoding="utf-8"))
+                self.assertTrue(cfg["tv"]["enabled"])
+                self.assertRegex(cfg["tv"]["pin"], r"^\d{6}$")
+                self.assertIn(cfg["tv"]["pin"], out.getvalue())
+            finally:
+                app.CONFIG = old
+
+
 class TestHandler(app.Handler):
     """Lets a test request pose as a device on the home network."""
     @property
@@ -218,13 +255,31 @@ class TvServerTests(unittest.TestCase):
     def test_tv_page_and_hello_are_open_but_everything_else_needs_pairing(self):
         status, _, csp, _ = self.req("GET", "/tv")
         self.assertEqual(status, 200)
-        self.assertIn("media-src https://archive.org", csp)
+        self.assertIn("media-src 'self' https://archive.org", csp)
         status, _, _, raw = self.req("GET", "/api/tv/hello")
         hello = json.loads(raw)
         self.assertEqual((status, hello["paired"]), (200, False))
         self.assertRegex(hello["ui"], r"^[0-9a-f]{16}$")      # the TV reloads when this changes
         self.assertIn("apk", hello)
         self.assertEqual(self.req("GET", "/api/search?q=film&cat=movies&smart=0")[0], 401)
+        self.assertEqual(self.req("GET", "/api/tv/magnet?id=x")[0], 401)          # magnets: paired TVs only
+
+    def test_hello_says_which_kind_of_computer_for_the_pc_mac_toggle(self):
+        hello = json.loads(self.req("GET", "/api/tv/hello")[3])
+        self.assertIn(hello["os"], ("windows", "mac", "linux"))
+        self.assertRegex(hello["id"], r"^[0-9a-f]{12}$")
+        self.assertEqual(json.loads(self.req("GET", "/api/tv/hello")[3])["id"], hello["id"])   # stable
+
+    def test_tv_and_phone_pages_call_this_computer_pc_or_mac(self):
+        old = app.HOST_WORD
+        try:
+            for word in ("Mac", "PC"):
+                app.HOST_WORD = word
+                for path in ("/tv", "/remote"):
+                    page = self.req("GET", path)[3].decode()
+                    self.assertIn(f'data-host="{word}"', page, path)
+        finally:
+            app.HOST_WORD = old
 
     def test_pc_only_endpoints_refuse_the_network_even_when_paired(self):
         _, cookie, _, _ = self.req("POST", "/api/tv/pair", {"pin": "654321"})

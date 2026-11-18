@@ -5,6 +5,10 @@
 
 const $ = (s, el = document) => el.querySelector(s);
 const BRIDGE = window.BuzzTV || null;
+// What this computer is called on screen: the server writes "PC" or "Mac" into <html data-host>
+const PC = document.documentElement.dataset.host || "PC";
+document.querySelectorAll(".pc").forEach((el) => { el.textContent = PC; });
+const APP_VERSION = (() => { try { return (BRIDGE && BRIDGE.appVersion && BRIDGE.appVersion()) || "browser"; } catch { return "older app"; } })();
 
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
@@ -28,12 +32,19 @@ const LANGS = [["any", "All languages"], ["hi", "Hindi"], ["bho", "Bhojpuri"], [
   ["ta", "Tamil"], ["te", "Telugu"], ["mr", "Marathi"], ["pa", "Punjabi"], ["en", "English"]];
 const LANG_NAME = Object.fromEntries(LANGS);
 const ROWS = [["popular", "Most popular"], ["trending", "Trending this week"], ["newest", "Recently added"]];
+const GENRES = [["any", "All genres"], ["action", "Action"], ["comedy", "Comedy"], ["drama", "Drama"], ["horror", "Horror"],
+  ["thriller", "Thriller"], ["romance", "Romance"], ["scifi", "Sci-fi"], ["animation", "Animation"],
+  ["documentary", "Documentary"], ["family", "Family & kids"], ["crime", "Crime"], ["war", "War"], ["western", "Western"],
+  ["mythology", "Mythology & devotional"]];
+const GENRE_NAME = Object.fromEntries(GENRES);
+const genreOn = () => ["movies", "tv"].includes(state.cat) && state.genre !== "any";
 const CAT_NOUN = { movies: "Film", tv: "TV", music: "Music", books: "Book", games: "Game", software: "Software" };
 const VERDICT = { safe: "Safe", caution: "Caution", danger: "Risky", unknown: "Unrated" };
 
 const state = {
   cat: store.get("cat", "movies"),
   lang: store.get("lang", "any"),
+  genre: store.get("genre", "any"),
   query: "",
   stack: [],          // open overlays, top last
   focusBack: [],      // element to refocus when each overlay closes
@@ -41,7 +52,9 @@ const state = {
   view: 0,            // bumps on every new view so late responses are dropped
   byId: new Map(),    // results shown so far, for commands from the phone remote
 };
-if (!TABS.some(([id]) => id === state.cat)) state.cat = "movies";
+if (!TABS.some(([id]) => id === state.cat) && state.cat !== "foryou") state.cat = "movies";
+/* The ♥ For you tab isn't a source category: searches made from it cover everything */
+const searchCat = () => state.qcat || (state.cat === "foryou" ? "all" : state.cat);
 if (!LANG_NAME[state.lang]) state.lang = "any";
 
 /* ------------------------------------------------------------------ api */
@@ -54,9 +67,9 @@ async function api(path, body) {
     headers: { "Content-Type": "application/json", "X-BuzzTorrent": "1" }, body: JSON.stringify(body),
   };
   let res;
-  try { res = await fetch(path, opts); } catch { throw new Offline("Can't reach BuzzTorrent on your PC"); }
+  try { res = await fetch(path, opts); } catch { throw new Offline(`Can't reach BuzzTorrent on your ${PC}`); }
   let data;
-  try { data = await res.json(); } catch { throw new Error(`The PC answered with an error (${res.status})`); }
+  try { data = await res.json(); } catch { throw new Error(`The ${PC} answered with an error (${res.status})`); }
   if (res.status === 401 && data.pair) { showPair(); throw new NeedPair("pair first"); }
   if (res.status === 403 && data.locked) { leaveAdult("The private section locked itself"); }
   if (!res.ok) throw new Error(data.error || res.statusText);
@@ -89,7 +102,7 @@ const playable = (r) => (r.sources || []).includes("Internet Archive");
 /* ------------------------------------------------------------ chrome */
 const adult = { shown: false, unlocked: false };
 function renderChips() {
-  const tabs = adult.shown ? [...TABS, ["adult", "🔒 18+"]] : TABS;
+  const tabs = [...TABS, ["foryou", "♥ For you"], ...(adult.shown ? [["adult", "🔒 18+"]] : [])];
   const chips = tabs.map(([id, label]) => h("button", {
     type: "button", class: "chip", "aria-pressed": String(id === state.cat), text: label,
     onclick: () => {
@@ -105,18 +118,82 @@ function renderChips() {
     type: "button", class: "chip", "aria-pressed": String(id === state.lang), text: label,
     onclick: () => { state.lang = id; store.set("lang", id); renderChips(); refresh(); },
   })));
+  // Genres: for films and TV, on the home rows (searching by title covers every genre)
+  const showGenres = ["movies", "tv"].includes(state.cat) && !state.query;
+  $("#genres").hidden = !showGenres;
+  if (showGenres) {
+    $("#genres").replaceChildren(...GENRES.map(([id, label]) => h("button", {
+      type: "button", class: "chip", "aria-pressed": String(id === state.genre), text: label,
+      onclick: () => { state.genre = id; store.set("genre", id); renderChips(); renderHome(false); },
+    })));
+  }
 }
 const refresh = () => (state.query ? runSearch(state.query, false) : renderHome(false));
+
+/* PC ⇄ Mac. The TV / headset app remembers every computer it was paired with (window.BuzzTV
+   .computers()); the header shows them as a toggle, and one press switches to the other one
+   (its pairing is kept, so there's no PIN again). Plain browsers have no bridge: no toggle. */
+const HOST_NAME = { mac: "Mac", windows: "PC", linux: "PC" };
+const HOST_ICON = { mac: "💻", windows: "🖥", linux: "🖥" };
+function savedComputers() {
+  if (!BRIDGE || !BRIDGE.computers) return null;
+  try {
+    const c = JSON.parse(BRIDGE.computers());
+    if (!c || !Array.isArray(c.list)) return null;
+    const seen = {};
+    for (const x of c.list) {                 // "PC", "Mac", and "PC 2" if there are two PCs
+      const base = HOST_NAME[x.os] || (x.url === c.active ? PC : "Computer");
+      seen[base] = (seen[base] || 0) + 1;
+      x.label = seen[base] > 1 ? `${base} ${seen[base]}` : base;
+      x.icon = HOST_ICON[x.os] || "🖥";
+    }
+    return c;
+  } catch { return null; }
+}
+function switchComputer(x) {
+  toast(`Connecting to your ${x.label}…`);
+  // let the toast paint first: the bridge waits up to a few seconds for a computer that's off
+  setTimeout(() => {
+    let r = "bad";
+    try { r = BRIDGE.switchTo(x.url); } catch { /* older app */ }
+    if (r === "offline") toast(`Your ${x.label} didn't answer. Is BuzzTorrent running on it, on this Wi-Fi?`, "bad");
+    else if (r !== "ok") toast(`Couldn't switch to your ${x.label}`, "bad");
+  }, 60);
+}
+function renderHostSwitch() {
+  const box = $("#hostSwitch");
+  const c = savedComputers();
+  if (!c || !c.list.length) { box.hidden = true; return; }
+  const btns = c.list.map((x) => {
+    const on = x.url === c.active;
+    return h("button", {
+      type: "button", class: "chip host", "aria-pressed": String(on), text: `${x.icon} ${x.label}`,
+      title: x.url.replace("http://", ""),
+      onclick: () => (on ? toast(`Connected to your ${x.label} (${x.url.replace("http://", "")})`) : switchComputer(x)),
+    });
+  });
+  if (c.list.length === 1 && BRIDGE.addComputer) {
+    const other = PC === "Mac" ? "PC" : "Mac";
+    btns.push(h("button", { type: "button", class: "chip host add", text: `＋ ${other}`,
+      title: `Pair this app with your ${other} too`, onclick: () => BRIDGE.addComputer() }));
+  }
+  box.replaceChildren(...btns);
+  box.hidden = false;
+}
 
 function offlineView(err) {
   const main = $("#main");
   const btns = [h("button", { type: "button", class: "act primary", text: "Try again", onclick: () => refresh() })];
+  const saved = err instanceof Offline && savedComputers();
+  for (const x of (saved ? saved.list : []).filter((x) => x.url !== saved.active)) {
+    btns.push(h("button", { type: "button", class: "act", text: `Switch to your ${x.label}`, onclick: () => switchComputer(x) }));
+  }
   if (BRIDGE && BRIDGE.resetServer) {
-    btns.push(h("button", { type: "button", class: "act", text: "Choose another PC", onclick: () => BRIDGE.resetServer() }));
+    btns.push(h("button", { type: "button", class: "act", text: `Choose another ${PC}`, onclick: () => BRIDGE.resetServer() }));
   }
   main.replaceChildren(h("div", { class: "status big" },
-    h("div", { text: err instanceof Offline ? "Can't reach BuzzTorrent on your PC." : err.message }),
-    h("div", { class: "d-note", text: err instanceof Offline ? "Make sure the PC is on and BuzzTorrent is running." : "" }),
+    h("div", { text: err instanceof Offline ? `Can't reach BuzzTorrent on your ${PC}.` : err.message }),
+    h("div", { class: "d-note", text: err instanceof Offline ? `Make sure the ${PC} is on and BuzzTorrent is running.` : "" }),
     h("div", { class: "d-actions center" }, btns)));
   btns[0].focus();
 }
@@ -130,10 +207,13 @@ function card(r) {
     img = h("img", { src: r.thumb, alt: "", loading: "lazy" });
     img.addEventListener("error", () => img.replaceWith(placeholder(r.title)), { once: true });
   }
-  const meta = [r.year, CAT_NOUN[r.category], fmtSize(r.size)].filter(Boolean).join(" · ");
+  // seeds: more seeds stream faster, so they're shown on every torrent
+  const seeds = !playable(r) && r.seeders != null ? `${r.seeders} seeds` : "";
+  const meta = [seeds, r.year, seeds ? "" : CAT_NOUN[r.category], fmtSize(r.size)]
+    .filter(Boolean).join(" · ");
   const q = r.quality?.label;
   state.byId.set(r.id, r);
-  return h("button", { type: "button", class: "card", onclick: () => openDetail(r) },
+  return h("button", { type: "button", class: "card", "data-id": r.id, onclick: () => openDetail(r) },
     h("div", { class: "thumb" }, img || placeholder(r.title),
       h("span", { class: `badge ${r.verdict}`, text: VERDICT[r.verdict] || r.verdict }),
       playable(r) ? h("span", { class: "badge play", text: "▶ Free" }) : null,
@@ -145,6 +225,7 @@ function card(r) {
 /* -------------------------------------------------------------- home */
 function renderHome(focusFirst = true) {
   state.query = "";
+  if (["movies", "tv"].includes(state.cat) && $("#genres").hidden) renderChips();
   $("#q").value = "";
   const view = ++state.view;
   const main = $("#main");
@@ -154,8 +235,11 @@ function renderHome(focusFirst = true) {
     if (focusFirst) $("#q").focus();
     return;
   }
+  if (state.cat === "foryou") return renderForYou(main, view, focusFirst);
   main.replaceChildren(h("p", { class: "phone-hint" }, "📱 Search from your phone: open ",
     h("b", { text: `${location.host}/remote` }), " on a phone on the same Wi-Fi"));
+  const recent = historyRow();
+  if (recent) main.append(recent);
   // Rows load in parallel; focus lands on the topmost row with cards, once every row above it is done
   let focused = !focusFirst;
   const tryFocus = () => {
@@ -187,13 +271,13 @@ function renderHome(focusFirst = true) {
     });
   };
 
-  addRow(main, "Continue watching", () => api("/api/tv/continue").then((d) => d.items), continueCard);
-  addRow(main, "Your watchlist", () => api("/api/tv/watchlist").then((d) => {
+  if (!genreOn()) addRow(main, "Continue watching", () => api("/api/tv/continue").then((d) => d.items), continueCard);
+  if (!genreOn()) addRow(main, "Your watchlist", () => api("/api/tv/watchlist").then((d) => {
     for (const a of (d.alerts || []).slice(0, 3)) toast(`🔔 ${a.text}`, "ok");
     if ((d.alerts || []).length) api("/api/tv/alerts/seen", {}).catch(() => {});
     return d.items.filter((w) => state.cat === "all" || w.category === state.cat || state.cat === "movies" && w.category === "all");
   }), watchCard);
-  if (state.lang === "any") {
+  if (state.lang === "any" && !genreOn()) {
     // Indian classics rows; the box holds their place while the shelf list loads
     const box = h("div", { "data-pending": "1" });
     main.append(box);
@@ -203,10 +287,11 @@ function renderHome(focusFirst = true) {
         .then((x) => x.results.filter((r) => r.verdict !== "danger"))));
     }).catch(() => {}).finally(() => { delete box.dataset.pending; tryFocus(); });
   }
-  ROWS.forEach(([sort, label]) => addRow(main, label,
-    () => api("/api/browse?" + qs({ cat: state.cat, sort, lang: state.lang, page: 1, family: 1 }))
+  const g = genreOn() ? state.genre : "any";
+  ROWS.forEach(([sort, label]) => addRow(main, g === "any" ? label : `${label} · ${GENRE_NAME[g]}`,
+    () => api("/api/browse?" + qs({ cat: state.cat, sort, lang: state.lang, genre: g, page: 1, family: 1 }))
       .then((d) => d.results.filter((r) => r.verdict !== "danger")),
-    card, "Nothing here yet for this language."));
+    card, g === "any" ? "Nothing here yet for this language." : "Nothing in this genre for this language yet."));
 }
 
 function continueCard(c) {
@@ -223,7 +308,7 @@ function continueCard(c) {
       c.quality ? h("span", { class: "badge q", text: c.quality }) : null,
       h("span", { class: "cw-bar" }, fill)),
     h("div", { class: "card-t", dir: "auto", text: c.name ? `${c.title} · ${c.name}` : c.title }),
-    h("div", { class: "card-m", text: `${c.key.startsWith("lib:") ? "On your PC · " : ""}${fmtTime(c.pos)} of ${fmtTime(c.dur)}` }));
+    h("div", { class: "card-m", text: `${c.key.startsWith("lib:") ? `On your ${PC} · ` : ""}${fmtTime(c.pos)} of ${fmtTime(c.dur)}` }));
 }
 
 function watchCard(w) {
@@ -244,6 +329,98 @@ function watchCard(w) {
   h("div", { class: "card-t", dir: "auto", text: w.title }),
   h("div", { class: "card-m", text: w.new ? "Better copy found" : "On your watchlist" }));
 }
+/* ------------------------------------------------------------ for you */
+/* Your video jockey: rows built on the PC from the titles you ♥ (see buzz/taste.py) */
+async function renderForYou(main, view, focusFirst, quiet = false) {
+  if (!quiet) main.replaceChildren(h("div", { class: "status" }, spinner(), "Lining up your picks…"));
+  let d, likes = [];
+  try {
+    d = await api("/api/tv/foryou");
+    if (d.likes) likes = (await api("/api/tv/likes")).items;
+  } catch (err) {
+    if (view !== state.view || err instanceof NeedPair) return;
+    if (err instanceof Offline) return offlineView(err);
+    main.replaceChildren(h("div", { class: "status", text: err.message }));
+    return;
+  }
+  if (view !== state.view) return;
+  const again = (ms) => setTimeout(() => { if (view === state.view && state.cat === "foryou") renderForYou(main, view, false, true); }, ms);
+  if (d.off) {
+    main.replaceChildren(h("div", { class: "status big" }, "Picks need Smart search, which is off.",
+      h("div", { class: "d-note", text: `On the ${PC}: BuzzTorrent → Settings → Smart search & details.` })));
+    return;
+  }
+  if (!d.likes) {
+    main.replaceChildren(h("div", { class: "status big" }, "♥ Like a few movies or shows and your picks will show up here.",
+      h("div", { class: "d-note", text: "Press ♡ Like on any title's page, or while you're watching. The more you like, the better the picks." })));
+    return;
+  }
+  if (d.building && !d.rows.length) {
+    main.replaceChildren(h("div", { class: "status big" }, spinner(), " Your video jockey is lining up picks… a few seconds.",
+      h("div", { class: "d-note", text: `Based on ${d.likes} title${d.likes === 1 ? "" : "s"} you liked.` })));
+    again(4000);
+    return;
+  }
+  const rows = d.rows.map((row) => h("section", { class: "row" }, h("h2", { text: row.label }),
+    h("div", { class: "row-track" }, ...row.items.map(recCard))));
+  main.replaceChildren(
+    h("p", { class: "phone-hint", text: d.building ? "Updating your picks…" : `Picks from the ${d.likes} title${d.likes === 1 ? "" : "s"} you liked. Like more for better picks; unlike on a title's page.` }),
+    ...rows,
+    h("section", { class: "row" }, h("h2", { text: "Your likes" }), h("div", { class: "row-track" }, ...likes.map(likeCard))));
+  if (focusFirst) $("#main .card")?.focus({ preventScroll: true });
+  if (d.building) again(6000);
+}
+
+function recCard(it) {
+  let img = null;
+  if (it.thumb && it.thumb.startsWith("/api/")) {
+    img = h("img", { src: it.thumb, alt: "", loading: "lazy" });
+    img.addEventListener("error", () => img.replaceWith(placeholder(it.title)), { once: true });
+  }
+  const cat = TABS.some(([id]) => id === it.category) ? it.category : "all";
+  return h("button", { type: "button", class: "card", onclick: () => runSearch(it.title, true, cat) },
+    h("div", { class: "thumb" }, img || placeholder(it.title),
+      it.year ? h("span", { class: "badge q", text: String(it.year) }) : null),
+    h("div", { class: "card-t", dir: "auto", text: it.title }),
+    h("div", { class: "card-m", text: it.reason || it.description || "" }));
+}
+
+function likeCard(l) {
+  let img = null;
+  if (l.thumb && l.thumb.startsWith("/api/")) {
+    img = h("img", { src: l.thumb, alt: "", loading: "lazy" });
+    img.addEventListener("error", () => img.replaceWith(placeholder(l.title)), { once: true });
+  }
+  return h("button", { type: "button", class: "card", onclick: () => runSearch(l.title, true, l.category) },
+    h("div", { class: "thumb" }, img || placeholder(l.title), h("span", { class: "badge like", text: "♥" })),
+    h("div", { class: "card-t", dir: "auto", text: l.title }),
+    h("div", { class: "card-m", text: [l.year, CAT_NOUN[l.category]].filter(Boolean).join(" · ") || "Liked" }));
+}
+
+/* Add or remove a ♥. `info` = {title, category, year, thumb, rid}; `entry` = the current like or null. */
+async function toggleLike(info, entry) {
+  try {
+    if (entry) {
+      await api("/api/tv/like", { action: "remove", id: entry.id });
+      toast("Removed from your likes");
+      return null;
+    }
+    const d = await api("/api/tv/like", info);
+    toast("♥ Liked. Your picks in ♥ For you will catch up in a moment", "ok");
+    return d.item;
+  } catch (err) {
+    if (!(err instanceof NeedPair)) toast(err.message, "bad");
+    return entry;
+  }
+}
+const likeCat = (c) => (["movies", "tv", "music"].includes(c) ? c : "movies");
+async function findLike(title, category) {
+  try {
+    const t = String(title).toLowerCase();
+    return (await api("/api/tv/likes")).items.find((l) => l.title.toLowerCase() === t && l.category === category) || null;
+  } catch { return null; }
+}
+
 function qualityLabel(height) {
   return height >= 4000 ? "8K" : height >= 2000 ? "4K" : height >= 1000 ? "1080p" : height >= 690 ? "720p" : height >= 440 ? "480p" : "Low";
 }
@@ -253,13 +430,19 @@ async function resumeItem(c) {
     if (c.key.startsWith("lib:")) {
       const d = await api("/api/tv/library");
       const it = d.items.find((x) => x.key === c.key);
-      if (!it) { toast("That video is no longer in the PC's download folder", "bad"); return; }
-      return playLibrary(it, d.progress, true);
+      if (!it) { toast(`That video is no longer in the ${PC}'s download folder`, "bad"); return; }
+      return playLibrary(it, d.progress, true, d.like);
+    }
+    if (c.key.startsWith("bt:")) {
+      const [, hash, index] = c.key.split(":");
+      return startStream({ thumb: c.thumb, quality: c.quality ? { label: c.quality } : null, category: "movies", title: c.title }, c.title,
+        { hash, index: Number(index), pos: c.pos });
     }
     const ident = c.key.split(":")[1];
     const d = await api("/api/tv/play?" + qs({ ident }));
     const i = Math.max(0, d.files.findIndex((f) => f.key === c.key));
     state.playingThumb = c.thumb || "";
+    state.playing = { title: c.title, category: "movies", thumb: c.thumb || "" };
     if (native()) return playNative(d, i, c.title, d.files[i]?.resume || 0);
     const inApp = d.files.filter((f) => f.url);
     if (!inApp.length) { toast("This copy needs the BuzzTorrent TV app to play", "bad"); return; }
@@ -269,20 +452,48 @@ async function resumeItem(c) {
   }
 }
 
+/* ---------------------------------------------------- search history */
+/* Kept on this TV only. Private-section searches are never added. */
+const HISTORY_MAX = 15;
+function remember(q) {
+  if (state.cat === "adult") return;
+  const old = store.get("history", []).filter((x) => typeof x === "string" && x.toLowerCase() !== q.toLowerCase());
+  store.set("history", [q, ...old].slice(0, HISTORY_MAX));
+}
+function historyRow() {
+  if (state.cat === "adult") return null;
+  const items = store.get("history", []).filter((x) => typeof x === "string");
+  if (!items.length) return null;
+  const sec = h("section", { class: "row recent" }, h("h2", { text: "Recent searches" }),
+    h("div", { class: "dym" },
+      items.map((q) => h("button", { type: "button", class: "chip", dir: "auto", text: q, onclick: () => runSearch(q) })),
+      h("button", { type: "button", class: "chip clear", text: "🗑  Clear history", onclick: () => {
+        store.set("history", []);
+        sec.remove();
+        toast("Search history cleared", "ok");
+        ($("#main .card") || $("#q")).focus({ preventScroll: true });
+      } })));
+  return sec;
+}
+
 /* ------------------------------------------------------------ search */
-async function runSearch(q, focusFirst = true) {
+async function runSearch(q, focusFirst = true, cat = null) {
   q = q.trim();
   if (!q) return renderHome();
   state.query = q;
+  state.qcat = cat;
+  remember(q);
+  $("#genres").hidden = true;                    // a title search covers every genre
   $("#q").value = q;
   const view = ++state.view;
   const main = $("#main");
-  const label = (TABS.find(([id]) => id === state.cat) || [, "the private section"])[1];
+  const label = (TABS.find(([id]) => id === searchCat()) || [, "the private section"])[1];
   main.replaceChildren(h("h2", { class: "section-h", text: `“${q}” in ${label}` + (state.lang !== "any" ? ` · ${LANG_NAME[state.lang]}` : "") }),
     h("div", { class: "status" }, spinner(), "Searching… this can take a few seconds"));
+  (document.scrollingElement || document.documentElement).scrollTop = 0;
   let d;
   try {
-    d = await api("/api/search?" + qs({ q, cat: state.cat, lang: state.lang }));
+    d = await api("/api/search?" + qs({ q, cat: searchCat(), lang: state.lang }));
   } catch (err) {
     if (view !== state.view || err instanceof NeedPair) return;
     if (err instanceof Offline) return offlineView(err);
@@ -295,19 +506,21 @@ async function runSearch(q, focusFirst = true) {
 }
 
 /* Filters on the results, the same as on the PC: minimum quality and "safe only" */
-const QUALITY_FILTERS = [["0", "Any quality"], ["690", "720p+"], ["1000", "1080p+"], ["2000", "4K+"]];
+/* Exactly that quality: "1080p" shows 1080p copies only, not 4K ones */
+const QUALITY_FILTERS = [["any", "Any quality"], ["720p", "720p"], ["1080p", "1080p"], ["4K", "4K"]];
 function drawResults(focusFirst = false) {
   const d = state.lastSearch;
   const main = $("#main");
   if (!d) return;
-  const minQ = Number(store.get("minq", "0"));
+  let qf = store.get("qfilter", "any");
+  if (!QUALITY_FILTERS.some(([v]) => v === qf)) qf = "any";
   const safeOnly = store.get("safeonly", false);
   const all = d.results.filter((r) => r.verdict !== "danger");
-  const items = all.filter((r) => (!safeOnly || r.verdict === "safe") && (!minQ || (r.quality?.height || 0) >= minQ));
+  const items = all.filter((r) => (!safeOnly || r.verdict === "safe") && (qf === "any" || (r.quality?.height && qualityLabel(r.quality.height) === qf)));
   const hidden = d.results.length - all.length;
   const filters = h("div", { class: "dym filters" },
-    QUALITY_FILTERS.map(([v, label]) => h("button", { type: "button", class: "chip", "aria-pressed": String(String(minQ) === v), text: label,
-      onclick: () => { store.set("minq", v); drawResults(); $(".filters .chip[aria-pressed=true]")?.focus(); } })),
+    QUALITY_FILTERS.map(([v, label]) => h("button", { type: "button", class: "chip", "aria-pressed": String(qf === v), text: label,
+      onclick: () => { store.set("qfilter", v); drawResults(); $(".filters .chip[aria-pressed=true]")?.focus(); } })),
     h("button", { type: "button", class: "chip", "aria-pressed": String(safeOnly), text: safeOnly ? "✓ Safe only" : "Safe only",
       onclick: () => { store.set("safeonly", !safeOnly); drawResults(); $(".filters .chip:last-child")?.focus(); } }));
   const parts = [main.firstChild, filters];
@@ -316,18 +529,59 @@ function drawResults(focusFirst = false) {
     parts.push(h("div", { class: "dym" }, h("span", { class: "dym-l", text: "Did you mean" }),
       dym.map((w) => h("button", { type: "button", class: "chip", text: w.year ? `${w.title} (${w.year})` : w.title, onclick: () => runSearch(w.title) }))));
   }
-  parts.push(items.length ? h("div", { class: "grid" }, items.map(card))
+  // A few hundred cards at once make a TV sluggish: show them a page at a time
+  const grid = h("div", { class: "grid" }, items.slice(0, PAGE).map(card));
+  let shown = Math.min(PAGE, items.length);
+  const more = h("button", { type: "button", class: "act", onclick: () => {
+    const next = items.slice(shown, shown + PAGE).map(card);
+    shown += next.length;
+    grid.append(...next);
+    fillPosters(items.slice(shown - next.length, shown));
+    if (shown >= items.length) moreBox.remove();
+    else more.textContent = `Show more (${items.length - shown} left)`;
+    next[0]?.focus({ preventScroll: true });
+    next[0]?.scrollIntoView({ block: "center" });
+  } }, `Show more (${items.length - shown} left)`);
+  const moreBox = h("div", { class: "more" }, more);
+  parts.push(items.length ? grid
     : h("div", { class: "status big", text: all.length ? `${all.length - items.length} results hidden by the filters above.`
       : state.cat === "tv" ? "No TV episodes found. Try Everything, or check spelling." : "Nothing found. Try another spelling or language." }));
+  if (shown < items.length) parts.push(moreBox);
   if (hidden) parts.push(h("div", { class: "status", text: `${hidden} risky result${hidden > 1 ? "s" : ""} hidden for your safety.` }));
   main.replaceChildren(...parts);
-  if (focusFirst) $(".grid .card", main)?.focus({ preventScroll: true });
+  fillPosters(items.slice(0, shown));
+  // Only jump to the results if the person hasn't moved somewhere else while waiting
+  const at = document.activeElement;
+  const idle = !at || at === document.body || !document.contains(at) || ["q", "micBtn", "micHiBtn", "main"].includes(at.id);
+  if (focusFirst && idle) $(".grid .card", main)?.focus({ preventScroll: true });
+}
+const PAGE = 40;
+
+/* Torrents have no artwork: the PC looks posters up on Wikipedia once the list is showing */
+async function fillPosters(results) {
+  const missing = results.filter((r) => !r.thumb && r.category !== "adult");
+  if (!missing.length) return;
+  const view = state.view;
+  try {
+    const { posters } = await api("/api/posters?" + qs({ ids: missing.map((r) => r.id).join(",") }));
+    if (view !== state.view) return;
+    for (const r of missing) {
+      if (!posters[r.id]) continue;
+      r.thumb = posters[r.id];
+      const ph = document.querySelector(`#main .card[data-id="${CSS.escape(r.id)}"] .ph`);
+      if (!ph) continue;
+      const img = h("img", { src: r.thumb, alt: "", loading: "lazy" });
+      img.addEventListener("error", () => img.replaceWith(placeholder(r.title)), { once: true });
+      ph.replaceWith(img);
+    }
+  } catch { /* posters are a nicety */ }
 }
 
 /* ----------------------------------------------------------- overlays */
 function push(id) {
   state.focusBack.push(document.activeElement);
   state.stack.push(id);
+  document.body.classList.add("locked");        // the page underneath doesn't scroll while a screen is open
   $("#" + id).hidden = false;
   $("#" + id).scrollTop = 0;
   try { history.pushState({ overlay: id }, ""); } catch { /* ignore */ }
@@ -336,7 +590,9 @@ function closeTop() {
   const id = state.stack.pop();
   if (!id) return;
   $("#" + id).hidden = true;
+  if (!state.stack.length) document.body.classList.remove("locked");
   if (id === "player") stopVideo();
+  if (id === "streamBox") stopStream();
   const back = state.focusBack.pop();
   if (back && document.contains(back)) back.focus({ preventScroll: true });
   setTimeout(reloadIfIdle, 300);
@@ -378,7 +634,7 @@ async function renderOtt(title) {
   try { services = (await api("/api/tv/services?" + qs({ title }))).services; } catch { return; }
   if (labels) services.sort((a, b) => hasApp(b, labels) - hasApp(a, labels));
   const btns = [];
-  if (BRIDGE && BRIDGE.globalSearch) {
+  if (BRIDGE && BRIDGE.globalSearch && (!BRIDGE.canGlobalSearch || BRIDGE.canGlobalSearch())) {
     btns.push(h("button", { type: "button", class: "ott installed", onclick: () => {
       const res = BRIDGE.globalSearch(title);
       if (res !== "ok") toast("Google TV search isn't available on this TV", "bad");
@@ -395,11 +651,14 @@ async function renderOtt(title) {
 
 function openService(s, title) {
   if (!BRIDGE) { window.open(s.web, "_blank", "noopener"); return; }
-  const res = BRIDGE.openService(JSON.stringify(s.apps), s.name, title);
+  let res = BRIDGE.openService(JSON.stringify(s.apps), s.name, title);
+  // No app and no Play Store (Meta Quest): the service's website in the browser
+  if (res === "none" && BRIDGE.openWeb && s.web && BRIDGE.openWeb(s.web) === "ok") res = "web";
   const msg = {
     search: [`Searching ${s.name} for “${title}”`, "ok"],
     opened: [`Opened ${s.name}. Search for “${title}” there`, "ok"],
     store: [`${s.name} isn't installed. Opening the Play Store`, ""],
+    web: [`Opening ${s.name}'s website`, ""],
   }[res] || [`Couldn't open ${s.name}`, "bad"];
   toast(...msg);
 }
@@ -410,11 +669,13 @@ async function openDetail(r) {
   poster.src = r.thumb || "/favicon.svg";
   $("#dTitle").textContent = r.title;
   const langs = (r.language || []).map((c) => LANG_NAME[c] || c);
-  $("#dMeta").textContent = [r.year, CAT_NOUN[r.category], fmtSize(r.size), ...langs, (r.sources || []).join(", ")].filter(Boolean).join(" · ");
+  const seeds = playable(r) || r.seeders == null ? "" : `${r.seeders} seeds${r.seeders < 5 ? " (may be slow)" : ""}`;
+  $("#dMeta").textContent = [r.year, CAT_NOUN[r.category], fmtSize(r.size), seeds, ...langs, (r.sources || []).join(", ")].filter(Boolean).join(" · ");
   $("#dBadges").replaceChildren(h("span", { class: `v-${r.verdict}`, text: `${VERDICT[r.verdict]} · ${r.score}/100` }),
     playable(r) ? h("span", { class: "v-free", text: "Free to watch" }) : null,
     r.quality ? h("span", { class: "v-q", text: r.quality.label + (r.quality.exact ? "" : " (from title)") }) : null);
   $("#dSummary").textContent = "";
+  $("#dCast").replaceChildren();
   $("#dFlags").replaceChildren(...(r.flags || []).filter((f) => f.level !== "info")
     .map((f) => h("li", { class: f.level, text: (f.level === "danger" ? "⛔ " : "⚠ ") + f.msg })));
 
@@ -430,12 +691,13 @@ async function openDetail(r) {
       if (best) playBtn.textContent = `▶  Play ${best}`;
     });
   }
-  const send = h("button", { type: "button", class: "act" + (playable(r) ? "" : " primary"), onclick: () => sendToPc(r, send) }, "⬇  Download on PC");
-  actions.push(send);
-  const toTv = tvDownloadButton(r);
-  if (toTv) actions.push(toTv);
+  if (canStream(r)) {
+    // Torrents stream straight to the TV: the PC fetches the video in playing order as it plays
+    actions.push(h("button", { type: "button", class: "act primary", onclick: () => startStream(r, $("#dTitle").textContent) },
+      `▶  Stream${r.quality ? " " + r.quality.label : ""}`));
+  }
   const priv = r.category === "adult";
-  if (!priv) actions.push(watchButton(r));
+  if (!priv) actions.push(likeButton(r), watchButton(r));
   for (const el of [$("#detail .d-h"), $("#dWatchNote"), $("#dOtt")]) el.hidden = priv;
   $("#dActions").replaceChildren(...actions);
   actions[0].focus();
@@ -447,24 +709,28 @@ async function openDetail(r) {
     if (d.title) $("#dTitle").textContent = d.title;
     if (d.poster) poster.src = d.poster;
     $("#dSummary").textContent = d.summary || d.upload?.description || "";
+    const people = [["Cast", d.cast || []], ...(d.facts || []).filter((f) => f.label !== "Cast").slice(0, 2).map((f) => [f.label, f.values])];
+    $("#dCast").replaceChildren(...people.filter(([, v]) => v.length)
+      .map(([label, v]) => h("span", {}, h("b", { text: label + ": " }), v.slice(0, 8).join(", "))));
     const extra = [d.runtime, (d.genres || []).slice(0, 3).join(", ")].filter(Boolean);
     if (extra.length) $("#dMeta").textContent += " · " + extra.join(" · ");
     if (d.title && !priv) renderOtt(d.title);
   } catch { /* details are optional */ }
 }
 
-async function sendToPc(r, btn) {
-  btn.disabled = true;
-  try {
-    const d = await api("/api/tv/send", { id: r.id });
-    toast(d.app === "BuzzTorrent" ? "Downloading on your PC. It shows up in My PC once finished and virus-scanned"
-      : `Downloading on your PC in ${d.app || "your torrent app"}`, "ok");
-  } catch (err) {
-    if (!(err instanceof NeedPair)) toast(err.message, "bad");
-  } finally {
-    btn.disabled = false;
-    btn.focus();
-  }
+/* ------------------------------------------------------------- like */
+function likeButton(r) {
+  const btn = h("button", { type: "button", class: "act" }, "♡  Like");
+  let entry = null;
+  const cat = likeCat(r.category);
+  const sync = () => { btn.textContent = entry ? "♥  Liked" : "♡  Like"; };
+  findLike($("#dTitle").textContent || r.title, cat).then((e) => { entry = e; sync(); });
+  btn.addEventListener("click", async () => {
+    entry = await toggleLike({ title: $("#dTitle").textContent || r.title, category: cat, year: r.year,
+      thumb: r.thumb || "", rid: r.id }, entry);
+    sync();
+  });
+  return btn;
 }
 
 /* ------------------------------------------------------- watchlist */
@@ -503,25 +769,25 @@ function watchButton(r) {
 async function openLibrary() {
   push("library");
   const grid = $("#libGrid");
-  grid.replaceChildren(h("div", { class: "status" }, spinner(), "Looking at your PC's downloads…"));
+  grid.replaceChildren(h("div", { class: "status" }, spinner(), `Looking at your ${PC}'s downloads…`));
   let d;
   try { d = await api("/api/tv/library"); } catch (err) {
     if (!(err instanceof NeedPair)) grid.replaceChildren(h("div", { class: "status", text: err.message }));
     return;
   }
   if (d.state === "scanner_off") {
-    grid.replaceChildren(h("div", { class: "status big", text: "Turn on the Download scanner on the PC (Settings → Download scanner) and choose your downloads folder. Every video it checks as clean shows up here." }));
+    grid.replaceChildren(h("div", { class: "status big", text: `Turn on the Download scanner on the ${PC} (Settings → Download scanner) and choose your downloads folder. Every video it checks as clean shows up here.` }));
     return;
   }
   const busy = (d.downloading || []).map((x) => h("div", { class: "status" },
-    `⬇ Downloading on your PC: ${x.title} · ${x.total ? Math.floor((x.done / x.total) * 100) : 0}%` +
+    `⬇ Downloading on your ${PC}: ${x.title} · ${x.total ? Math.floor((x.done / x.total) * 100) : 0}%` +
     (x.down ? ` · ${fmtSize(x.down)}/s` : "") + " (appears here once finished and scanned)"));
-  $("#library .d-note").replaceChildren("Videos your PC downloaded and its virus scanner checked. They stream from the PC.", ...busy);
+  $("#library .d-note").replaceChildren(`Videos your ${PC} downloaded and its virus scanner checked. They stream from the ${PC}.`, ...busy);
   if (!d.items.length) {
-    grid.replaceChildren(h("div", { class: "status big", text: "No scanned videos yet. Downloads appear here once the PC's scanner has checked them." }));
+    grid.replaceChildren(h("div", { class: "status big", text: `No scanned videos yet. Downloads appear here once the ${PC}'s scanner has checked them.` }));
     return;
   }
-  grid.replaceChildren(...d.items.map((it) => h("button", { type: "button", class: "card", onclick: () => playLibrary(it, d.progress) },
+  grid.replaceChildren(...d.items.map((it) => h("button", { type: "button", class: "card", onclick: () => playLibrary(it, d.progress, false, d.like) },
     h("div", { class: "thumb" }, placeholder(it.title),
       h("span", { class: "badge safe", text: "✓ Scanned" }),
       it.label ? h("span", { class: `badge q q-${it.label.toLowerCase()}`, text: it.label }) : null,
@@ -531,14 +797,15 @@ async function openLibrary() {
   $("#libGrid .card")?.focus();
 }
 
-function playLibrary(it, progress, resumeNow = false) {
+function playLibrary(it, progress, resumeNow = false, likeUrl = "") {
+  state.playing = it.private ? null : { title: it.title, category: "movies", year: it.year };
   const run = (from) => {
     if (native()) {
       state.playingThumb = "";
       // every copy of the video, best first: the player falls back if the TV can't decode one
       const versions = (it.versions || [{ stream: it.stream, label: it.label || it.ext.toUpperCase(), size: it.size }])
         .map((v) => ({ url: location.origin + v.stream, label: v.label, size: v.size }));
-      playNative({ progress, files: [{ name: it.title, key: it.key, resume: from, seconds: 0, subs: it.subs, versions }] }, 0, it.title, from);
+      playNative({ progress, like: likeUrl, files: [{ name: it.title, key: it.key, resume: from, seconds: 0, subs: it.subs, versions }] }, 0, it.title, from);
     } else {
       startPlayer([{ url: it.stream, name: it.title, key: it.key, label: it.label }], 0, it.title, from);
     }
@@ -547,84 +814,11 @@ function playLibrary(it, progress, resumeNow = false) {
   else withResume(it.resume, it.title, run);
 }
 
-/* ------------------------------------------------------ download to TV */
+/* ----------------------------------------- videos saved on this TV earlier */
 const canSaveOnTv = () => !!(BRIDGE && BRIDGE.downloadToTv && BRIDGE.listDownloads);
-
-function tvDownloadButton(r) {
-  if (canSaveOnTv() && playable(r)) {
-    return h("button", { type: "button", class: "act", onclick: () => downloadToTv(r, $("#dTitle").textContent) }, "⬇  Download to TV");
-  }
-  if (BRIDGE && BRIDGE.openMagnet && r.magnet) {
-    // Not a free Archive copy: a torrent app on the TV can fetch it (no PC antivirus scan there)
-    return h("button", { type: "button", class: "act", onclick: () => {
-      if (BRIDGE.openMagnet(r.magnet) === "ok") toast("Sent to the torrent app on this TV", "ok");
-      else toast("Install a torrent app such as LibreTorrent on the TV, or use Download on PC", "bad");
-    } }, "⬇  Download to TV");
-  }
-  return null;
-}
 
 function storages() {
   try { return JSON.parse(BRIDGE.storage()).sort((a, b) => b.free - a.free); } catch { return []; }
-}
-
-async function downloadToTv(r, title) {
-  const d = await loadPlay(r);
-  if (!d) return;
-  const files = d.files.filter((f) => f.versions && f.versions.length);
-  if (!files.length) { toast(d.note || "Nothing here can be saved", "bad"); return; }
-  const places = storages();
-  if (!places.length) { toast("No storage available on this TV", "bad"); return; }
-  let place = 0;
-  push("picker");
-
-  const start = (name, v) => BRIDGE.downloadToTv(JSON.stringify({
-    url: v.url, title: name, label: v.label || v.format, size: v.size || 0, storage: places[place].id }));
-  const report = (res, what) => {
-    if (res === "ok") toast(`Downloading ${what} to the TV. Open Downloads to follow it`, "ok");
-    else if (res === "fallback") toast(`Saving ${what} to the TV's own storage instead`, "ok");
-    else toast(res, "bad");
-  };
-
-  const render = () => {
-    const st = places[place];
-    const fits = (size) => !size || size < st.free - 200 * 1024 * 1024;   // keep 200 MB spare
-    $("#pTitle").textContent = `Download to TV: ${title}`;
-    const head = [h("div", { class: "p-head", text: `Saving to ${st.label} · ${fmtSize(st.free)} free` })];
-    if (places.length > 1) {
-      const other = places[(place + 1) % places.length];
-      head.push(h("button", { type: "button", class: "p-item", "data-key": "place",
-        onclick: () => { place = (place + 1) % places.length; render(); } },
-        h("span", { text: `Save to ${other.label} instead` }), h("span", { text: `${fmtSize(other.free)} free` })));
-    }
-    let items;
-    if (files.length === 1) {
-      const f = files[0];
-      items = f.versions.map((v, i) => h("button", { type: "button", class: "p-item", "data-key": "v" + i,
-        disabled: !fits(v.size), onclick: () => { report(start(title, v), v.label || "the video"); history.back(); } },
-        h("span", { text: `${i === 0 ? "★ " : ""}${v.label || "Video"} · ${v.format}` }),
-        h("span", { text: fits(v.size) ? fmtSize(v.size) : `${fmtSize(v.size)} · doesn't fit` })));
-    } else {
-      const total = files.reduce((n, f) => n + (f.versions[0].size || 0), 0);
-      items = [h("button", { type: "button", class: "p-item", "data-key": "all", disabled: !fits(total),
-        onclick: () => {
-          let ok = 0;
-          for (const f of files) if (["ok", "fallback"].includes(start(`${title} - ${f.name}`, f.versions[0]))) ok++;
-          toast(`Downloading ${ok} of ${files.length} videos to the TV`, ok ? "ok" : "bad");
-          history.back();
-        } }, h("span", { text: `All ${files.length} videos (best quality)` }),
-        h("span", { text: fits(total) ? fmtSize(total) : `${fmtSize(total)} · doesn't fit` }))];
-      files.forEach((f, i) => {
-        const v = f.versions[0];
-        items.push(h("button", { type: "button", class: "p-item", "data-key": "e" + i, disabled: !fits(v.size),
-          onclick: () => { report(start(`${title} - ${f.name}`, v), f.name); history.back(); } },
-          h("span", { dir: "auto", text: f.name }), h("span", { text: [v.label, fmtSize(v.size)].filter(Boolean).join(" · ") })));
-      });
-    }
-    $("#pList").replaceChildren(...head, ...items);
-    ($("#pList .p-item:not([disabled]):not([data-key=place])") || $("#pList .p-item"))?.focus();
-  };
-  render();
 }
 
 /* the Downloads screen: progress, play offline, delete */
@@ -632,6 +826,7 @@ let dlTimer = 0;
 const armedDelete = new Set();
 function openDownloads() {
   push("downloads");
+  $("#dlTitle").textContent = `Downloads · TV app ${APP_VERSION}`;
   renderDownloads();
   clearInterval(dlTimer);
   dlTimer = setInterval(() => { if (topOverlay() === "downloads") renderDownloads(); else clearInterval(dlTimer); }, 2000);
@@ -647,7 +842,7 @@ async function renderPcDownloads() {
   const keep = document.activeElement?.dataset?.key;
   const items = d.items.filter((x) => x.status !== "removed");
   if (!items.length) {
-    $("#dlPc").replaceChildren(h("div", { class: "status", text: "Nothing downloading on the PC. Use ⬇ Download on PC on any title." }));
+    $("#dlPc").replaceChildren(h("div", { class: "status", text: `Nothing downloading on the ${PC}. Use ⬇ Download on ${PC} on any title.` }));
     return;
   }
   $("#dlPc").replaceChildren(...items.map((x) => {
@@ -763,7 +958,16 @@ function playNative(d, index, title, resumeFrom) {
     bitrates: f.versions.map((v) => (v.size && f.seconds ? Math.round((v.size * 8) / f.seconds) : 0)),
     subs: (f.subs || []).filter((x) => x.url).map((x) => ({ label: x.label, url: abs(x.url) })),
   }));
-  if (BRIDGE.playNative(JSON.stringify({ title, index, items, progress: abs(d.progress) })) !== "ok") toast("Couldn't start the player", "bad");
+  const payload = { title, index, items, progress: abs(d.progress), like: nativeLike(d.like, title) };
+  if (BRIDGE.playNative(JSON.stringify(payload)) !== "ok") toast("Couldn't start the player", "bad");
+}
+
+/* The native players (TV app, Quest cinema) get a ♥ button: where to post, and what the title is */
+function nativeLike(url, title) {
+  const p = state.playing;
+  if (!url || !p || !p.title) return null;
+  return { url: url.startsWith("/") ? location.origin + url : url, title: p.title || title, category: p.category || "movies",
+    year: p.year || null, thumb: p.thumb || "" };
 }
 
 /* "Resume from 34:10" or "Start over" when there's a saved position */
@@ -786,6 +990,7 @@ async function play(r, title) {
   if (!d) return;
   if (!d.files.length) { toast(d.note || "Nothing playable here", "bad"); return; }
   state.playingThumb = r.thumb || "";
+  state.playing = { title, category: likeCat(r.category), year: r.year, thumb: r.thumb || "", rid: r.id };
   if (native()) {
     const go = (i) => withResume(d.files[i].resume, title, (from) => playNative(d, i, title, from));
     if (d.files.length === 1) { go(0); return; }
@@ -849,10 +1054,23 @@ function startPlayer(files, i, title, resumeFrom = 0) {
   if (i + 1 < files.length) btns.push(h("button", { type: "button", text: "Next ▶▶", onclick: () => startPlayer(files, i + 1, title) }));
   if (i > 0) btns.push(h("button", { type: "button", text: "◀◀ Previous", onclick: () => startPlayer(files, i - 1, title) }));
   if (BRIDGE && BRIDGE.playExternal) btns.push(h("button", { type: "button", text: "Open in another player", onclick: () => BRIDGE.playExternal(f.alt ? f.alt.url : f.url, title) }));
+  const like = hudLikeButton();
+  if (like) btns.push(like);
   $("#hudBtns").replaceChildren(...btns);
   $("#player").focus();
   document.activeElement?.blur?.();
   showHud();
+}
+/* ♡ Like while watching: press ▼ on the remote to reach it */
+function hudLikeButton() {
+  const info = state.playing;
+  if (!info || !info.title) return null;
+  const btn = h("button", { type: "button", text: "♡ Like" });
+  let entry = null;
+  const sync = () => { btn.textContent = entry ? "♥ Liked" : "♡ Like"; };
+  findLike(info.title, info.category).then((e) => { entry = e; sync(); });
+  btn.addEventListener("click", async () => { entry = await toggleLike(info, entry); sync(); showHud(); });
+  return btn;
 }
 function stopVideo() {
   video.pause();
@@ -937,7 +1155,7 @@ async function submitPin() {
   try {
     await api("/api/tv/pair", { pin });
     $("#pair").hidden = true;
-    toast("TV paired with your PC", "ok");
+    toast(`TV paired with your ${PC}`, "ok");
     remoteLoop();
     refresh();
   } catch (err) {
@@ -945,6 +1163,179 @@ async function submitPin() {
     pin = "";
     drawPin();
   }
+}
+
+/* ---------------------------------------------------------- streaming */
+/* Torrents play while they download: the PC fetches the video in playing order and hands
+   it to the TV. A short buffer first, then the player starts by itself. */
+const canStream = (r) => !playable(r) && !!(r.infohash || r.magnet || r.has_torrent);
+let streamRun = 0;
+function stopStream() {
+  streamRun++;
+  const s = state.stream;
+  state.stream = null;
+  if (s && s.hash) api("/api/tv/bt/stop", { hash: s.hash }).catch(() => {});
+}
+function streamStage(text, frac = null) {
+  $("#sStage").textContent = text;
+  $("#sBar").hidden = frac === null;
+  if (frac !== null) $("#sFill").style.width = `${Math.round(Math.min(1, Math.max(0, frac)) * 100)}%`;
+}
+function streamButtons(s, st) {
+  const btns = [];
+  if (st && st.url) {
+    btns.push(h("button", { type: "button", class: "act primary", onclick: () => launchStream(s, st, true) },
+      s.launched ? "▶  Play again" : "▶  Play now"));
+    if (BRIDGE && BRIDGE.playExternal) {
+      btns.push(h("button", { type: "button", class: "act", onclick: () => BRIDGE.playExternal(location.origin + st.url, s.title) },
+        "Play in another app (VLC…)"));
+    }
+  }
+  btns.push(h("button", { type: "button", class: "act", onclick: () => history.back() }, "✕  Stop"));
+  const had = $("#sActions").contains(document.activeElement) ? document.activeElement.textContent : null;
+  $("#sActions").replaceChildren(...btns);
+  // keep focus on the same button across refreshes, else the first one
+  const same = had && btns.find((b) => b.textContent === had);
+  const elsewhere = $("#sFiles").contains(document.activeElement) || $("#sSubs").contains(document.activeElement);
+  if (topOverlay() === "streamBox" && !elsewhere) (same || btns[0]).focus({ preventScroll: true });
+}
+
+async function startStream(r, title, resume = null) {
+  const run = ++streamRun;
+  push("streamBox");
+  const s = { hash: "", index: resume ? resume.index : null, title, thumb: r.thumb || "",
+    quality: r.quality?.label || "", private: r.category === "adult", resume: resume ? resume.pos : 0,
+    asked: !!resume, prepared: false, launched: false };
+  state.stream = s;
+  state.playing = s.private ? null : { title, category: likeCat(r.category), year: r.year, thumb: r.thumb || "", rid: r.id };
+  const alive = () => run === streamRun;
+  $("#sTitle").textContent = title;
+  $("#sStats").textContent = "";
+  $("#sWarn").replaceChildren();
+  $("#sFiles").replaceChildren();
+  $("#sSubs").hidden = true;
+  streamStage("Connecting…");
+  streamButtons(s, null);
+  const fail = (msg) => { if (alive()) { streamStage(msg); $("#sBar").hidden = true; streamButtons(s, null); } };
+
+  // 1. hand the torrent to the PC's streaming engine (set up once, the first time)
+  while (alive() && !s.hash) {
+    let d;
+    try { d = await api("/api/tv/bt/start", resume ? { hash: resume.hash } : { id: r.id }); } catch (err) {
+      if (!(err instanceof NeedPair)) fail("⚠ " + err.message);
+      return;
+    }
+    if (!d.installing) { s.hash = d.hash; break; }
+    const st = await api("/api/tv/bt/status?" + qs({ h: "" })).catch(() => ({}));
+    if (st.stage === "installing") {
+      streamStage(st.state === "scanning" ? `Setting up streaming on your ${PC} (one time): virus-checking it…`
+        : `Setting up streaming on your ${PC} (one time, about 60 MB)…`, null);
+    } else if (st.stage === "error") return fail("⚠ " + st.error);
+    await sleep(1500);
+  }
+
+  // 2. follow it: file list, safety check, buffer, then play
+  while (alive()) {
+    let st;
+    try { st = await api("/api/tv/bt/status?" + qs({ h: s.hash, i: s.index ?? "" })); } catch (err) {
+      if (!(err instanceof NeedPair)) fail("⚠ " + err.message);
+      return;
+    }
+    if (!alive()) return;
+    const peers = st.total_peers ? `${st.peers} of ${st.total_peers} peers connected` : "looking for peers";
+    $("#sStats").textContent = st.stage === "error" ? "" : [peers, st.speed ? `${fmtSize(st.speed)}/s` : ""].filter(Boolean).join(" · ")
+      + (s.quality === "4K" && st.speed && st.speed < 3e6 ? " · 4K needs about 3 MB/s or more: if it stutters, pick a copy with more seeds" : "");
+    $("#sWarn").replaceChildren(...(st.warnings || []).map((w) => h("li", { class: "warn", text: "⚠ " + w })));
+    if (st.stage === "error") return fail("⚠ " + st.error);
+    if (st.stage === "metadata") streamStage("Finding the video…");
+    else if (st.stage === "choose") {
+      if (s.index === null) {
+        if (st.files.length === 1) s.index = st.files[0].index;
+        else {
+          streamStage(`${st.files.length} videos. Choose one`);
+          s.index = await new Promise((pick) => {
+            const items = st.files.map((f) => h("button", { type: "button", class: "p-item", onclick: () => pick(f.index) },
+              h("span", { dir: "auto", text: f.name }), h("span", { text: [f.resume ? "resume " + fmtTime(f.resume) : "", fmtSize(f.size)].filter(Boolean).join(" · ") })));
+            $("#sFiles").replaceChildren(...items);
+            items[0].focus();
+          });
+          if (!alive()) return;
+          $("#sFiles").replaceChildren();
+        }
+      }
+      if (!s.prepared) {
+        s.prepared = true;
+        try { await api("/api/tv/bt/prepare", { hash: s.hash, index: s.index }); } catch (err) { return fail("⚠ " + err.message); }
+        loadStreamSubs(s);
+        continue;
+      }
+    } else if (st.stage === "checking") streamStage("Checking it's a real video…");
+    else if (st.stage === "buffering") {
+      streamStage("Buffering…", st.preload_size ? st.preloaded / st.preload_size : 0);
+    } else if (st.stage === "ready") {
+      streamStage(s.launched ? "Streaming. Press ▶ Play again to go back to it" : "Ready", 1);
+      if (!s.launched) launchStream(s, st);
+    }
+    if (st.url && !$("#sActions .act.primary")) streamButtons(s, st);
+    else if (st.url && s.launched) streamButtons(s, st);
+    await sleep(st.stage === "ready" && s.launched ? 3000 : 1000);
+  }
+}
+
+/* Subtitles: the ones that came with the torrent, plus online ones when the PC has a SubDL key.
+   The choice (a language, or Off) is remembered; ▲ in the player switches them too. */
+async function loadStreamSubs(s) {
+  let subs = [];
+  try { subs = (await api("/api/tv/bt/subs?" + qs({ h: s.hash, i: s.index }))).subs; } catch { /* none */ }
+  if (state.stream !== s) return;
+  s.subs = subs;
+  const want = store.get("subLang", "off");
+  s.sub = want === "off" ? -1 : subs.findIndex((x) => x.lang === want);
+  if (s.sub < 0 && want !== "off" && subs.length) s.sub = subs.findIndex((x) => x.lang === "en");
+  drawSubChoice(s);
+}
+function drawSubChoice(s) {
+  const box = $("#sSubs");
+  if (!s.subs.length) {
+    box.hidden = false;
+    box.replaceChildren(h("span", { class: "dym-l", text: "No subtitles found for this video" }));
+    return;
+  }
+  const pick = (i) => () => {
+    s.sub = i;
+    store.set("subLang", i < 0 ? "off" : s.subs[i].lang || "off");
+    drawSubChoice(s);
+    $("#sSubs .chip[aria-pressed=true]")?.focus();
+  };
+  box.hidden = false;
+  box.replaceChildren(h("span", { class: "dym-l", text: "Subtitles" }),
+    h("button", { type: "button", class: "chip", "aria-pressed": String(s.sub < 0), text: "Off", onclick: pick(-1) }),
+    ...s.subs.map((x, i) => h("button", { type: "button", class: "chip", "aria-pressed": String(s.sub === i), text: x.label, onclick: pick(i) })),
+    h("span", { class: "dym-l", text: "· ▲ in the player turns them on or off" }));
+}
+
+function launchStream(s, st, byHand = false) {
+  const f = (st.files || []).find((x) => x.index === s.index) || {};
+  if (!s.asked && f.resume > 0 && !byHand) {
+    s.asked = true;
+    withResume(f.resume, s.title, (from) => { s.resume = from; launchStream(s, st, true); });
+    return;
+  }
+  s.launched = true;
+  const url = location.origin + st.url;
+  const key = s.private ? "" : `bt:${s.hash}:${s.index}`;
+  const name = (st.files || []).length > 1 ? f.name || "" : "";
+  if (native()) {
+    const payload = { title: s.title, index: 0, progress: s.private ? "" : location.origin + st.progress,
+      like: s.private ? null : nativeLike(st.like, s.title),
+      items: [{ name: name || s.title, key, thumb: s.private ? "" : s.thumb, resume: s.resume || 0,
+        urls: [url], labels: [s.quality || "Stream"], bitrates: [0],
+        subs: (s.subs || []).map((x) => ({ label: x.label, url: location.origin + x.url })), sub: s.sub ?? -1 }] };
+    if (BRIDGE.playNative(JSON.stringify(payload)) !== "ok") toast("Couldn't start the player", "bad");
+  } else {
+    startPlayer([{ url: st.url, name: name || s.title, key, label: s.quality }], 0, s.title, s.resume || 0);
+  }
+  s.resume = 0;
 }
 
 /* ----------------------------------------------------- remote control */
@@ -959,7 +1350,15 @@ function move(dir) {
   const list = focusables();
   if (!list.length) return;
   const cur = document.activeElement;
-  if (!list.includes(cur)) { list[0].focus(); list[0].scrollIntoView({ block: "center", inline: "nearest" }); return; }
+  if (!list.includes(cur)) {
+    // Nothing focused (e.g. right after a search): start on what's on screen, never the search box,
+    // which would pop up the keyboard
+    const onScreen = (el) => { const b = el.getBoundingClientRect(); return b.bottom > 0 && b.top < innerHeight; };
+    const first = list.find((el) => el.closest("#main") && onScreen(el)) || list.find((el) => el.tagName !== "INPUT" && onScreen(el)) || list[0];
+    first.focus({ preventScroll: true });
+    first.scrollIntoView({ block: "nearest", inline: "nearest" });
+    return;
+  }
   const a = cur.getBoundingClientRect();
   const ax = a.left + a.width / 2, ay = a.top + a.height / 2;
   let best = null, bestScore = Infinity;
@@ -976,9 +1375,25 @@ function move(dir) {
     const score = main + cross * (dir === "left" || dir === "right" ? 3 : 0.6);
     if (score < bestScore) { bestScore = score; best = el; }
   }
-  if (!best) return;
+  const scroller = scrollContainer();
+  if (!best) {
+    // Nothing further that way: still scroll, so the top is always reachable and long text can be read
+    if (dir === "up") scroller.scrollTop = 0;
+    else if (dir === "down") scroller.scrollTop += scroller.clientHeight * 0.6;
+    return;
+  }
   best.focus({ preventScroll: true });
-  best.scrollIntoView({ block: best.classList.contains("card") ? "center" : "nearest", inline: "nearest", behavior: "smooth" });
+  // Instant scrolling: smooth scrolling stutters on TV hardware
+  const bTop = best.getBoundingClientRect().top;
+  const nothingAbove = !list.some((el) => el !== best && el.getBoundingClientRect().bottom <= bTop + 2);
+  if (nothingAbove) scroller.scrollTop = 0;                  // first row: show everything above it (title, poster, header)
+  else best.scrollIntoView({ block: best.classList.contains("card") ? "center" : "nearest", inline: "nearest" });
+}
+/* What scrolls right now: the open screen (details, pickers, Downloads…) or the page itself */
+function scrollContainer() {
+  if (!$("#pair").hidden) return $("#pair");
+  const id = topOverlay();
+  return id ? $("#" + id) : (document.scrollingElement || document.documentElement);
 }
 
 document.addEventListener("keydown", (e) => {
@@ -1002,6 +1417,28 @@ document.addEventListener("keydown", (e) => {
   move(dir);
 });
 
+/* Pointer devices (Meta Quest controllers or hands, touch, mouse): pointing at a button
+   highlights it like the remote's focus does, and a ← Back button replaces the Back key. */
+const pointerMode = () => {
+  document.body.classList.add("pointer");
+  document.documentElement.classList.add("pointer");   // desk density: more fits on a panel or monitor
+};
+if (/OculusBrowser|Quest/i.test(navigator.userAgent)) pointerMode();
+document.addEventListener("pointerdown", pointerMode, { once: true, passive: true });
+document.addEventListener("pointerover", (e) => {
+  if (!document.body.classList.contains("pointer")) return;
+  const b = e.target.closest && e.target.closest("button");
+  const typing = document.activeElement && document.activeElement.tagName === "INPUT";
+  if (b && !b.disabled && b !== document.activeElement && !typing) b.focus({ preventScroll: true });
+});
+$("#backFab").addEventListener("click", () => window.buzzBack());
+/* BuzzTorrent VR (Meta Quest): step into the cinema and pick a room without starting a video */
+renderHostSwitch();
+if (window.BuzzVR) {
+  $("#vrBtn").hidden = false;
+  $("#vrBtn").addEventListener("click", () => window.BuzzVR.openCinema());
+}
+
 /* -------------------------------------------------------------- start */
 $("#searchForm").addEventListener("submit", (e) => { e.preventDefault(); $("#q").blur(); runSearch($("#q").value); });
 $("#homeBtn").addEventListener("click", () => renderHome());
@@ -1013,7 +1450,7 @@ $("#dlBtn").addEventListener("click", openDownloads);
 let uiVersion = null, updateWaiting = false;
 async function checkForUpdate() {
   try {
-    const hello = await api("/api/tv/hello");
+    const hello = await api("/api/tv/hello?" + qs({ app: APP_VERSION }));
     if (uiVersion === null) uiVersion = hello.ui;
     else if (hello.ui && hello.ui !== uiVersion) { updateWaiting = true; reloadIfIdle(); }
   } catch { /* PC offline: try again later */ }
@@ -1021,7 +1458,7 @@ async function checkForUpdate() {
 function reloadIfIdle() {
   if (!updateWaiting || state.stack.length || !$("#pair").hidden) return;
   store.set("justUpdated", true);
-  location.hash = state.query && state.cat !== "adult" ? qs({ q: state.query, cat: state.cat, lang: state.lang }) : "";
+  location.hash = state.query && state.cat !== "adult" ? qs({ q: state.query, cat: searchCat(), lang: state.lang }) : "";
   location.reload();
 }
 setInterval(checkForUpdate, 60000);
@@ -1126,7 +1563,7 @@ async function runRemote(cmd) {
       const r = await getResult(cmd.id);
       closeAll();
       await openDetail(r);
-      if (cmd.action === "play") play(r, $("#dTitle").textContent);
+      if (cmd.action === "play") (canStream(r) ? startStream(r, $("#dTitle").textContent) : play(r, $("#dTitle").textContent));
     }
   } catch (err) {
     if (!(err instanceof NeedPair)) toast(err.message, "bad");
@@ -1142,8 +1579,10 @@ function cleanQuery(q) {
   const rest = t.replace(cmd, "");
   return rest.replace(/\s+(full\s+)?(movie|film|please)$/i, "") || rest;
 }
+const canVoice = !!(BRIDGE && BRIDGE.voiceSearch && (!BRIDGE.canVoice || BRIDGE.canVoice()));
 function startVoice(lang = "en-IN") {
-  if (!(BRIDGE && BRIDGE.voiceSearch)) { $("#q").focus(); return; }
+  if (!canVoice) { $("#q").focus(); return; }
+  $("#q").blur();                                  // no on-screen keyboard left behind the voice prompt
   if (BRIDGE.voiceSearch(lang) !== "ok") toast("Voice search isn't available on this TV. Use the keyboard's mic instead", "bad");
 }
 window.startVoice = startVoice;
@@ -1154,7 +1593,7 @@ window.onVoice = (text) => {
   closeAll();
   runSearch(q);
 };
-if (BRIDGE && BRIDGE.voiceSearch) {
+if (canVoice) {
   $("#micBtn").hidden = $("#micHiBtn").hidden = false;
   $("#micBtn").addEventListener("click", () => startVoice("en-IN"));
   $("#micHiBtn").addEventListener("click", () => startVoice("hi-IN"));
@@ -1164,7 +1603,7 @@ async function start() {
   renderChips();
   if (store.get("justUpdated", false)) { store.set("justUpdated", false); toast("BuzzTorrent was updated", "ok"); }
   try {
-    const hello = await api("/api/tv/hello");
+    const hello = await api("/api/tv/hello?" + qs({ app: APP_VERSION }));
     uiVersion = hello.ui;
     if (!hello.paired) { showPair(); return; }
   } catch (err) {

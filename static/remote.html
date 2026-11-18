@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-host="PC">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -20,7 +20,7 @@
 
 <section id="pairBox" class="card" hidden>
   <h1>Pair this phone</h1>
-  <p>Enter the 6-digit PIN from BuzzTorrent on the PC (Settings → Living-room TV).</p>
+  <p>Enter the 6-digit PIN from BuzzTorrent on the <span class="pc">PC</span> (Settings → Living-room TV).</p>
   <form id="pairForm" class="row">
     <input id="pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="PIN" aria-label="PIN">
     <button type="submit" class="primary">Pair</button>
@@ -37,6 +37,7 @@
   <div class="chips" id="cats" aria-label="Category"></div>
   <div class="chips" id="langs" aria-label="Language"></div>
   <p class="hint" id="hint">Results appear on your TV. Tap one here to open it there.</p>
+  <div class="chips" id="sorts" aria-label="Sort" hidden></div>
   <ul class="results" id="results"></ul>
 </main>
 

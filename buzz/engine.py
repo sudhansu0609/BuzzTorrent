@@ -30,9 +30,11 @@ BROWSE_TTL = 3600
 MAX_THUMBS = 600
 HIRES_TAGS = ("2160p", "4K", "8K")
 QUALITY_CHECKS = 24     # strong video matches whose real resolution is looked up per search
-QUALITY_WAIT = 8        # seconds; slower lookups just leave the title's guess in place
+QUALITY_WAIT = 4        # seconds; slower lookups just leave the title's guess in place
+LOOSE_GRACE = 3         # seconds typo-tolerant searches may run on after the exact search is done
 STRONG = 0.8        # a result this similar to the query counts as a real match
 LOOSE_MIN = 0.72    # typo-tolerant candidates must be at least this close to be shown
+POSTER_CATEGORIES = ("movies", "tv", "other", "all")    # many sites file films under their own codes ("other")
 CATEGORY_NOUN = {"movies": "Film", "tv": "TV", "games": "Game", "software": "Software", "books": "Book", "music": "Music"}
 
 
@@ -89,9 +91,10 @@ class Engine:
         found, errors, stats, _ = self._fan_out_many(queries + hires, category, limit, hires=set(hires), **flt)
 
         loose: list[Result] = []
+        grace = time.time() + LOOSE_GRACE
         for fut in loose_futs:
             try:
-                loose.extend(fut.result(timeout=SEARCH_TIMEOUT))
+                loose.extend(fut.result(timeout=max(0.1, grace - time.time())))
             except Exception:
                 pass                                   # best effort; the exact search already reported errors
         try:
@@ -119,6 +122,7 @@ class Engine:
             targets += alts
 
         merged = self._separate_adult(self._merge(found + loose + extra), category)
+        self._works_posters(merged, info["works"])
         with self._lock:
             for r in merged:
                 r.relevance = round(rel(r, targets), 3)
@@ -159,6 +163,52 @@ class Engine:
             if not errors:  # don't pin a transient source failure in the cache
                 self._cache[key] = (time.time(), payload)
         return payload
+
+    def _works_posters(self, results: list[Result], works: list[dict]) -> None:
+        """Torrents have no artwork: give the ones that are the film/show Wikipedia found for this
+        search its poster (same title, same year give or take one)."""
+        works = [w for w in works if w.get("thumb")]
+        if not works:
+            return
+        for r in results:
+            if r.thumb or r.category not in POSTER_CATEGORIES:
+                continue
+            title, year = clean_release(r.title)
+            year = r.year or year
+            for w in works:
+                if similarity(title, w["title"]) >= 0.9 and not (year and w["year"] and abs(year - w["year"]) > 1):
+                    r.thumb = self.details.register_image(w["thumb"])
+                    break
+
+    def posters(self, ids: list[str]) -> dict[str, str]:
+        """Posters for results shown without one (other films in the list), looked up on
+        Wikipedia by cleaned-up title and year. Answers within about 10 s with what it found."""
+        groups: dict[tuple, tuple[str, int | None, str, list[str]]] = {}
+        for rid in ids[:60]:
+            with self._lock:
+                r = self._results.get(rid)
+            if r is None or r.thumb or r.category not in POSTER_CATEGORIES:
+                continue
+            title, year = clean_release(r.title)
+            year = r.year or year
+            if len(norm(title)) < 2:
+                continue
+            groups.setdefault((norm(title), year, r.category), (title, year, r.category, []))[3].append(rid)
+        futs = {self._pool.submit(self.details.poster, t, y, c): rids for t, y, c, rids in list(groups.values())[:15]}
+        done, _ = wait(futs, timeout=10)
+        out = {}
+        for fut in done:
+            try:
+                url = fut.result()
+            except Exception:
+                continue
+            if url:
+                with self._lock:
+                    for rid in futs[fut]:
+                        out[rid] = url
+                        if rid in self._results:
+                            self._results[rid].thumb = url
+        return out
 
     @staticmethod
     def _separate_adult(results: list[Result], category: str) -> list[Result]:

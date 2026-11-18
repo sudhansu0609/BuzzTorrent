@@ -10,12 +10,14 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 import webbrowser
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -26,21 +28,24 @@ from buzz.providers import ArchiveOrgProvider, TorznabProvider
 from buzz.safehttp import FetchError, FetchPolicy, fetch
 from buzz.scanner import DownloadScanner
 from buzz.smart import SmartSearch
-from buzz.fuzzy import LANGUAGES
-from buzz.providers.archive_org import GENRE_QUERY
+from buzz.fuzzy import LANGUAGES, clean_release
+from buzz.providers.archive_org import GENRE_QUERY, MOVIE_GENRE_QUERY
 from buzz import tv
+from buzz.streamer import Streamer, StreamError, find_torrserver
 from buzz import osutil
+from buzz.jackett import JackettRunner, find_exe as find_jackett
 from buzz import subtitles as subs_mod
 from buzz.library import CONTENT_TYPES, Library
 from buzz.quality import label as quality_label
+from buzz.taste import Taste
 from buzz.tvstate import TvState
 from buzz.bencode import BencodeError, parse_torrent
 from buzz.downloader import Downloader, DownloaderError, find_aria2
-from buzz.adult import COOKIE as ADULT_COOKIE, AdultGate
+from buzz.adult import COOKIE as ADULT_COOKIE, AdultGate, is_adult
 from buzz.details import IA_IDENT
 
 LANG_IDS = {"any", *LANGUAGES}
-GENRE_IDS = {"any", *GENRE_QUERY}
+GENRE_IDS = {"any", *GENRE_QUERY, *MOVIE_GENRE_QUERY}
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "config.json"
@@ -64,18 +69,23 @@ REMOTE_OPEN = {"/tv", "/tv.js", "/tv.css", "/remote", "/remote.js", "/remote.css
                "/BuzzTorrentTV.apk", "/api/tv/hello", "/api/tv/pair"}
 REMOTE_PAIRED = {"/api/search", "/api/suggest", "/api/details", "/api/image", "/api/browse/options", "/api/browse",
                  "/api/thumb", "/api/tv/play", "/api/tv/services", "/api/tv/send", "/api/tv/remote",
-                 "/api/tv/remote/poll", "/api/tv/result", "/api/tv/library", "/api/tv/continue",
+                 "/api/tv/remote/poll", "/api/tv/result", "/api/tv/magnet", "/api/tv/library", "/api/tv/continue",
                  "/api/tv/watchlist", "/api/tv/watch", "/api/tv/alerts/seen", "/api/tv/progress",
+                 "/api/tv/likes", "/api/tv/like", "/api/tv/foryou",
                  "/api/tv/shelves", "/api/tv/shelf", "/api/adult/state", "/api/adult/unlock", "/api/adult/lock",
-                 "/api/downloads", "/api/downloads/action"}
+                 "/api/downloads", "/api/downloads/action",
+                 "/api/tv/bt/start", "/api/tv/bt/status", "/api/tv/bt/prepare", "/api/tv/bt/stop", "/api/tv/bt/subs", "/api/posters"}
 PUBLIC_CATEGORIES = tuple(c for c in CATEGORIES if c != "adult")
 # Links the TV app's native player opens itself (it can't send the pairing cookie): they carry
 # a short-lived signature instead, handed out only to paired devices.
-SIGNED_PREFIXES = ("/api/tv/stream/", "/api/tv/subtitles/", "/api/tv/progress")
+SIGNED_PREFIXES = ("/api/tv/stream/", "/api/tv/bt/play/", "/api/tv/subtitles/", "/api/tv/progress", "/api/tv/like")
 SUB_POLICY = FetchPolicy(("archive.org",), max_bytes=subs_mod.MAX_BYTES, timeout=15)
+SUBDL_API_POLICY = FetchPolicy(("api.subdl.com",), content_types=("json",), max_bytes=2 * 1024 * 1024, timeout=12)
+SUBDL_DL_POLICY = FetchPolicy(("dl.subdl.com", "subdl.com"), content_types=("zip", "octet-stream"),
+                              max_bytes=5 * 1024 * 1024, timeout=20)
 # The TV page streams Internet Archive videos straight from archive.org.
 TV_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
-          "media-src https://archive.org https://*.archive.org; base-uri 'none'; form-action 'self'; "
+          "media-src 'self' https://archive.org https://*.archive.org; base-uri 'none'; form-action 'self'; "
           "frame-ancestors 'none'")
 FIREWALL_RULE = "BuzzTorrent TV"
 SECURITY_HEADERS = {
@@ -106,6 +116,8 @@ DEFAULTS = {
     "downloader": {"aria2": None, "folder": None, "seed_ratio": 1.0, "seed_minutes": 30},
     # Private 18+ section: off and hidden unless turned on with a PIN; per-device unlock.
     "adult": {"enabled": False, "pin_hash": "", "pin_salt": "", "on_tv": False},
+    # Jackett runs alongside BuzzTorrent and is stopped when BuzzTorrent quits (one that was already running is left alone).
+    "jackett": {"autostart": True, "exe": None, "port": 9117},
 }
 MAX_BODY = 64 * 1024
 
@@ -118,6 +130,7 @@ def load_config() -> dict:
     merged["tv"] = {**DEFAULTS["tv"], **cfg.get("tv", {})}
     merged["downloader"] = {**DEFAULTS["downloader"], **cfg.get("downloader", {})}
     merged["adult"] = {**DEFAULTS["adult"], **cfg.get("adult", {})}
+    merged["jackett"] = {**DEFAULTS["jackett"], **cfg.get("jackett", {})}
     if not CONFIG.exists():
         save_config(merged)
     return merged
@@ -195,10 +208,13 @@ class Handler(BaseHTTPRequestHandler):
     app_mode = False       # started by the launcher, so it can restart itself
     pairing: tv.Pairing
     remote_channel = tv.RemoteChannel()
+    tv_seen: dict = {}                  # TV address -> {"app": version, "at": time}
     downloader: Downloader
+    streamer: Streamer
     adult: AdultGate
     library: Library
     tvstate: TvState
+    taste: Taste
     signer: tv.Signer
     sub_cache: dict = {}
 
@@ -304,7 +320,10 @@ class Handler(BaseHTTPRequestHandler):
             if url.path in STATIC:
                 name, ctype = STATIC[url.path]
                 extra = {"Content-Security-Policy": TV_CSP} if url.path == "/tv" else None
-                return self._send(200, (ROOT / "static" / name).read_bytes(), ctype, extra)
+                body = (ROOT / "static" / name).read_bytes()
+                if url.path in ("/", "/tv", "/remote"):    # "PC" or "Mac" in the page's words
+                    body = body.replace(b'data-host="PC"', f'data-host="{HOST_WORD}"'.encode(), 1)
+                return self._send(200, body, ctype, extra)
             if url.path == "/api/player/info":
                 return self._json(200, {"vlc": bool(find_vlc())})
             if url.path == "/api/adult/state":
@@ -346,6 +365,9 @@ class Handler(BaseHTTPRequestHandler):
                     # nothing leaves this PC: no Wikipedia lookups for private searches
                     return self._json(200, self.engine.search(q, cat, smart=False, lang=lang, genre=genre))
                 return self._json(200, self.engine.search(q, cat, smart=arg("smart") != "0", lang=lang, genre=genre))
+            if url.path == "/api/posters":
+                ids = [i for i in arg("ids").split(",") if i][:60]
+                return self._json(200, {"posters": self.engine.posters(ids)})
             if url.path == "/api/suggest":
                 q = " ".join(CONTROL.sub(" ", arg("q")).split())[:100]
                 cat = arg("cat") or "all"
@@ -433,13 +455,25 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("expected a JSON object")
         return data
 
+    def _drain_body(self) -> None:
+        """Read (and drop) a request body we're refusing: answering before the client has finished
+        sending makes Windows reset the connection, so the client sees an error, not our reply."""
+        try:
+            length = min(int(self.headers.get("Content-Length") or 0), MAX_BODY)
+        except ValueError:
+            length = 0
+        if length > 0:
+            self.rfile.read(length)
+
     def do_POST(self):
         if not self._host_ok():
+            self._drain_body()
             return self._json(403, {"error": "bad host header"})
         parts = urllib.parse.urlsplit(self.path)
         path = parts.path
         refused = self._remote_refusal(path, parts.query)
         if refused:
+            self._drain_body()
             return self._json(*refused)
         if path == "/api/bye":
             # sendBeacon from a closing window can't add custom headers, but it only ever
@@ -587,8 +621,13 @@ class Handler(BaseHTTPRequestHandler):
                               {"Content-Disposition": "attachment; filename=BuzzTorrentTV.apk"})
         if path == "/api/tv/hello":
             # Lets the TV app find this PC on the network. Says nothing beyond "BuzzTorrent is here".
+            app_ver = arg("app")[:16]
+            if self.remote and app_ver and self.pairing.check(self._token()):
+                # remember which TV app version each paired TV runs (shown in the PC's settings)
+                seen = self.tv_seen
+                seen[self.client_address[0]] = {"app": app_ver, "at": time.time()}
             return self._json(200, {"app": "BuzzTorrent", "version": __version__, "ui": tv_ui_version(),
-                                    "apk": apk_version(),
+                                    "apk": apk_version(), "os": HOST_OS, "id": instance_id(),
                                     "paired": self.pairing.check(self._token()) if self.remote else True})
         if path == "/api/tv/remote/poll":
             # The TV waits here for searches sent from a phone (long poll)
@@ -597,6 +636,16 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 after = -1
             return self._json(200, self.remote_channel.wait(after, timeout=25))
+        if path == "/api/tv/magnet":
+            r = self.engine._get(arg("id"))
+            if r.verdict == "danger":
+                raise PermissionError("Rated risky. Download it on the PC if you really want it")
+            if not r.infohash and r.torrent_url:
+                self.engine.inspect(r.id)                 # fetches and verifies the .torrent, filling in the hash
+            magnet = r.magnet(self.engine.extra_trackers)
+            if not magnet:
+                return self._json(404, {"error": "No magnet link for this result"})
+            return self._json(200, {"magnet": magnet})
         if path == "/api/tv/result":
             return self._json(200, self.engine._get(arg("id")).to_json(self.engine.extra_trackers))
         if path == "/api/tv/services":
@@ -622,7 +671,8 @@ class Handler(BaseHTTPRequestHandler):
                     sub["url"] = self.signer.sign(f"/api/tv/subtitles/{ref}")
             note = "" if files else "This upload has no video the TV can play (it may be subtitles, audio or a disc image)."
             return self._json(200, {"ident": ident, "files": files, "note": note,
-                                    "progress": self.signer.sign("/api/tv/progress")})
+                                    "progress": self.signer.sign("/api/tv/progress"),
+                                    "like": self.signer.sign("/api/tv/like")})
         if path == "/api/tv/library":
             items = []
             open_ = self._adult_ok()
@@ -642,18 +692,43 @@ class Handler(BaseHTTPRequestHandler):
                             **({"title": "Private download"} if d.get("private") and not open_ else {})}
                            for d in self.downloader.list() if d["status"] in ("active", "metadata", "waiting", "paused")]
             return self._json(200, {"state": self.library.state(), "items": items, "downloading": downloading,
-                                    "progress": self.signer.sign("/api/tv/progress")})
+                                    "progress": self.signer.sign("/api/tv/progress"),
+                                    "like": self.signer.sign("/api/tv/like")})
         if path.startswith("/api/tv/stream/"):
             p = self.library.path(path.rsplit("/", 1)[1])
             if not p:
                 return self._json(404, {"error": "not in the scanned library"})
             return self._stream_file(p, CONTENT_TYPES.get(p.suffix.lstrip(".").lower(), "application/octet-stream"))
+        if path == "/api/tv/bt/status":
+            h, i = arg("h").lower(), arg("i")
+            try:
+                st = self.streamer.status(h, int(i) if i.isdigit() else None)
+            except StreamError as e:
+                return self._json(200, {"stage": "error", "error": str(e)})
+            for f in st.get("files") or []:
+                f["resume"] = self.tvstate.position(f"bt:{h}:{f['index']}")
+            if st["stage"] in ("buffering", "ready") and i.isdigit():
+                st["url"] = self.signer.sign(f"/api/tv/bt/play/{h}/{int(i)}")
+                st["progress"] = self.signer.sign("/api/tv/progress")
+                st["like"] = self.signer.sign("/api/tv/like")
+            return self._json(200, st)
+        if path == "/api/tv/bt/subs":
+            return self._json(200, {"subs": self._stream_subs(arg("h").lower(), arg("i"))})
+        if path.startswith("/api/tv/bt/play/"):
+            m = re.fullmatch(r"/api/tv/bt/play/([0-9a-f]{40})/(\d{1,5})", path)
+            if not m:
+                return self._json(404, {"error": "not found"})
+            return self._proxy_stream(m.group(1), int(m.group(2)))
         if path.startswith("/api/tv/subtitles/"):
             return self._json(200, {"cues": self._subtitles(path.rsplit("/", 1)[1])})
         if path == "/api/tv/continue":
             return self._json(200, {"items": self.tvstate.continue_list()})
         if path == "/api/tv/watchlist":
             return self._json(200, {"items": self.tvstate.watchlist(), "alerts": self.tvstate.alerts()})
+        if path == "/api/tv/likes":
+            return self._json(200, {"items": self.tvstate.likes()})
+        if path == "/api/tv/foryou":
+            return self._json(200, self.taste.for_you())
         if path == "/api/tv/shelves":
             return self._json(200, {"shelves": self.engine.shelves(arg("cat") or "movies")})
         if path == "/api/tv/shelf":
@@ -676,6 +751,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/tv/progress":
             key = str(body.get("key", ""))
             private = {f"lib:{it['id']}" for it in self.library.items() if it.get("private")}
+            if key.startswith("bt:") and key.split(":")[1] in self.streamer.private:
+                private.add(key)
             if key not in private:                 # private videos leave no Continue watching trace
                 self.tvstate.report(body)
             return self._json(200, {"ok": True})
@@ -689,6 +766,28 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/tv/alerts/seen":
             self.tvstate.mark_seen()
             return self._json(200, {"ok": True})
+        if path == "/api/tv/like":
+            # ♥ from a details page or a player (TV, PC, Quest). Private titles are never remembered.
+            if body.get("category") == "adult" or is_adult(str(body.get("title", "")), str(body.get("category", ""))):
+                raise ValueError("Private titles aren't remembered")
+            if body.get("action") == "remove":
+                return self._json(200, {"ok": True, "gone": self.taste.unlike(str(body.get("id", ""))[:32])})
+            title, year = clean_release(str(body.get("title") or ""))      # "Sholay.1975.1080p" -> Sholay, 1975
+            body = {**body, "title": title, "year": body.get("year") if isinstance(body.get("year"), int) else year}
+            if body.get("action") == "toggle":                              # native players don't track state
+                old = self.tvstate.liked(title, str(body.get("category") or "movies"))
+                if old:
+                    self.taste.unlike(old["id"])
+                    return self._json(200, {"ok": True, "liked": False})
+            result = None
+            rid = str(body.get("rid") or "")
+            if rid:
+                try:
+                    result = self.engine._get(rid)
+                except Exception:
+                    result = None
+            like = self.taste.like(body, result)
+            return self._json(200, {"ok": True, "liked": True, "item": like})
         if path == "/api/tv/remote":
             cmd = tv.remote_command(body, PUBLIC_CATEGORIES, LANG_IDS)
             return self._json(200, {"ok": True, "seq": self.remote_channel.post(cmd)})
@@ -706,6 +805,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("This result has no magnet link")
             app = tv.open_on_pc(magnet)
             return self._json(200, {"ok": True, "app": app})
+        if path.startswith("/api/tv/bt/"):
+            return self._stream_post(path, body)
         if self.remote:
             raise PermissionError("only available on the PC")
         if path == "/api/tv/config":
@@ -714,6 +815,97 @@ class Handler(BaseHTTPRequestHandler):
             allow_firewall(self.port)
             return self._json(200, tv_status(type(self)))
         return self._json(404, {"error": "not found"})
+
+    def _stream_post(self, path: str, body: dict):
+        """Streaming a torrent to the TV: start it, pick the file, stop it."""
+        st = self.streamer
+        if path == "/api/tv/bt/start":
+            if not st.available:
+                st.install_async()               # one-time setup; the TV shows its progress
+                return self._json(200, {"hash": "", "installing": True})
+            h = str(body.get("hash", "")).lower()
+            if h:                                # "Continue watching" restarts a stream by its hash
+                if not re.fullmatch(r"[0-9a-f]{40}", h):
+                    raise ValueError("bad torrent hash")
+                magnet = f"magnet:?xt=urn:btih:{h}" + "".join(
+                    "&tr=" + urllib.parse.quote(t, safe="") for t in self.engine.extra_trackers)
+                return self._json(200, {"hash": st.add(st.titles.get(h, ""), magnet=magnet)})
+            r = self.engine._get(str(body.get("id", "")))
+            if r.verdict == "danger":
+                raise PermissionError("Rated risky, so it won't stream. Download it on the PC if you really want it")
+            private = r.category == "adult"
+            if private and not self._adult_ok():
+                return self._json(403, {"error": "The private section is locked", "locked": True})
+            if not r.infohash and r.torrent_url:
+                self.engine.inspect(r.id)        # fetches and verifies the .torrent, filling in the hash
+            torrent = None
+            if r.torrent_url or r.trusted_source:
+                try:
+                    _, torrent = self.engine.torrent_file(r.id)
+                except (NotFound, FetchError, PermissionError):
+                    torrent = None
+            h = st.add(r.title, magnet=r.magnet(self.engine.extra_trackers), torrent=torrent, private=private)
+            return self._json(200, {"hash": h, "private": private})
+        if path == "/api/tv/bt/prepare":
+            idx = body.get("index")
+            if not isinstance(idx, int) or not 0 <= idx < 100000:
+                raise ValueError("bad file index")
+            st.prepare(str(body.get("hash", "")).lower(), idx)
+            return self._json(200, {"ok": True})
+        if path == "/api/tv/bt/stop":
+            st.drop(str(body.get("hash", "")).lower())
+            return self._json(200, {"ok": True})
+        return self._json(404, {"error": "not found"})
+
+    def _stream_subs(self, h: str, i: str) -> list[dict]:
+        """Subtitles for a streaming video: the ones in the torrent, then SubDL's (with a key)."""
+        if not re.fullmatch(r"[0-9a-f]{40}", h) or not i.isdigit():
+            raise ValueError("bad stream")
+        try:
+            files = self.streamer.status(h, None).get("files") or []
+        except StreamError:
+            files = []
+        video = next((f for f in files if f["index"] == int(i)), None)
+        if not video:
+            return []
+        sign = lambda spec: self.signer.sign(f"/api/tv/subtitles/{tv.b64(spec)}")
+        out = [{"label": s["label"], "lang": s["lang"], "url": sign(f"bt:{h}:{s['index']}")} for s in video.get("subs", [])]
+        key = (self.cfg.get("subtitles") or {}).get("subdl_key", "")
+        if key and h not in self.streamer.private:          # private streams: nothing leaves the PC
+            title, year = clean_release(self.streamer.titles.get(h, "") or video["name"])
+            try:
+                found = subs_mod.subdl_search(lambda url: json.loads(fetch(url, SUBDL_API_POLICY)), key, title, year,
+                                              video["name"])
+            except (FetchError, ValueError):
+                found = []
+            out += [{"label": s["label"], "lang": s["lang"], "url": sign("sd:" + s["path"])} for s in found]
+        return out
+
+    def _proxy_stream(self, h: str, index: int):
+        """Passes the TorrServer stream on to the TV, Range requests included (for seeking)."""
+        try:
+            conn, resp = self.streamer.open(h, index, self.headers.get("Range"))
+        except StreamError as e:
+            return self._json(502, {"error": str(e)})
+        except OSError as e:
+            return self._json(502, {"error": f"The streaming engine isn't answering ({e})"})
+        try:
+            self.send_response(resp.status)
+            for name in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified"):
+                if resp.getheader(name):
+                    self.send_header(name, resp.getheader(name))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            while True:
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        except (socket.timeout, TimeoutError):
+            pass                                  # the swarm stalled; the player shows it's buffering and retries
+        finally:
+            conn.close()
 
     @classmethod
     def download_folder(cls) -> Path:
@@ -813,6 +1005,21 @@ class Handler(BaseHTTPRequestHandler):
             if not p or not subs_mod.is_subtitle(p.name) or p.stat().st_size > subs_mod.MAX_BYTES:
                 raise NotFound("subtitle not found")
             data = p.read_bytes()
+        elif spec.startswith("bt:"):
+            _, h, idx = (spec.split(":") + ["", ""])[:3]
+            if not idx.isdigit():
+                raise NotFound("bad subtitle reference")
+            try:
+                data = self.streamer.subtitle(h, int(idx))
+            except StreamError as e:
+                raise NotFound(str(e))
+        elif spec.startswith("sd:"):
+            if not subs_mod.subdl_valid(spec[3:]):
+                raise NotFound("bad subtitle reference")
+            try:
+                data = subs_mod.from_zip(fetch(subs_mod.SUBDL_DL + spec[3:], SUBDL_DL_POLICY))
+            except (FetchError, ValueError, zipfile.BadZipFile) as e:
+                raise NotFound(f"couldn't get those subtitles: {e}")
         elif spec.startswith("ia:"):
             ident, _, name = spec[3:].partition("/")
             if not tv.IDENT.match(ident) or not subs_mod.is_subtitle(name) or \
@@ -864,10 +1071,45 @@ def apk_version() -> dict | None:
 _ui_cache: dict = {}
 
 
+HOST_OS = "mac" if osutil.IS_MAC else "windows" if osutil.IS_WIN else "linux"
+HOST_WORD = "Mac" if osutil.IS_MAC else "PC"      # what the TV and headset pages call this computer
+_instance: dict = {}
+
+
+def instance_id() -> str:
+    """A random id for this BuzzTorrent install (kept in data/), so a TV or headset that knows
+    both your PC and your Mac can tell them apart, and still find one whose address changed."""
+    if "id" not in _instance:
+        f = ROOT / "data" / "instance-id"
+        try:
+            v = f.read_text(encoding="ascii").strip()
+        except OSError:
+            v = ""
+        if not re.fullmatch(r"[0-9a-f]{12}", v):
+            v = secrets.token_hex(6)
+            try:
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(v, encoding="ascii")
+            except OSError:
+                pass
+        _instance["id"] = v
+    return _instance["id"]
+
+
+def keep_awake_on_power() -> None:
+    """macOS: while BuzzTorrent serves the TV/headset, stop the Mac sleeping when it's on the
+    charger (on battery it sleeps as usual). Ends by itself when BuzzTorrent quits."""
+    if osutil.IS_MAC and shutil.which("caffeinate"):
+        try:
+            subprocess.Popen(["caffeinate", "-s", "-w", str(os.getpid())], **osutil.detached())
+        except OSError:
+            pass
+
+
 def tv_ui_version() -> str:
-    """Changes whenever the TV page's files or the server version change, so an open TV
-    reloads itself after an update on the PC."""
-    files = [ROOT / "static" / n for n in ("tv.html", "tv.js", "tv.css")]
+    """Changes whenever the TV or phone-remote page's files or the server version change, so an
+    open TV or phone reloads itself after an update on the PC."""
+    files = [ROOT / "static" / n for n in ("tv.html", "tv.js", "tv.css", "remote.html", "remote.js", "remote.css")]
     key = tuple(f.stat().st_mtime_ns for f in files if f.exists())
     if _ui_cache.get("key") != key:
         h = hashlib.sha256(__version__.encode())
@@ -890,6 +1132,27 @@ def jackett_settings() -> Path | None:
              Path.home() / ".config" / "Jackett" / "ServerConfig.json",
              Path.home() / "Library" / "Application Support" / "Jackett" / "ServerConfig.json"]
     return next((p for p in cands if p.is_file()), None)
+
+
+def enable_tv(autostart: bool) -> int:
+    """Command line (the Mac setup uses it): TV access on, so the TV / headset can find this computer."""
+    try:
+        cfg = load_config()
+    except ValueError as e:
+        print(f"config.json is not valid JSON: {e}")
+        return 1
+    t = cfg["tv"]
+    t["enabled"] = True
+    if not t.get("pin"):
+        t["pin"] = tv.new_pin()
+    if autostart:
+        from buzz.shortcuts import set_autostart
+        set_autostart(ROOT, True)
+        t["autostart"] = True
+    save_config(cfg)
+    addr = (tv.lan_addresses() or ["<this computer's address>"])[0]
+    print(f"TV access is on. Pairing PIN: {t['pin']}  (address {addr}:{cfg['port']})")
+    return 0
 
 
 def connect_jackett() -> int:
@@ -937,6 +1200,7 @@ def tv_status(h: type | None = None) -> dict:
             "addresses": tv.lan_addresses(), "paired": len(t.get("tokens", [])), "autostart": t["autostart"],
             "firewall": firewall_allowed(), "apk": APK.is_file(), "apk_version": apk_version(),
             "magnet_app": tv.magnet_handler(),
+            "tvs": sorted(({"address": a, **v} for a, v in getattr(h, "tv_seen", {}).items()), key=lambda x: -x["at"])[:5],
             "app_mode": h.app_mode}
 
 
@@ -1096,6 +1360,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--wait-port", action="store_true", help="wait up to 20 s for the port to free up (restart)")
     ap.add_argument("--connect-jackett", action="store_true",
                     help="add the Jackett on this computer as a source (reads its API key from Jackett's settings)")
+    ap.add_argument("--enable-tv", action="store_true",
+                    help="turn on TV access (TV app, VR headset, phone remote on the home network) and print the PIN")
+    ap.add_argument("--tv-autostart", action="store_true",
+                    help="with --enable-tv: also start BuzzTorrent (no window) when you log in")
     args = ap.parse_args(argv)
 
     if args.install_shortcuts:
@@ -1105,6 +1373,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.connect_jackett:
         return connect_jackett()
+    if args.enable_tv:
+        return enable_tv(args.tv_autostart)
     if args.app or sys.stdout is None:
         _log_to_file()
 
@@ -1150,11 +1420,17 @@ def main(argv: list[str] | None = None) -> int:
     Handler.library = Library(Handler.scanner, titles=Handler.downloader.titles,
                               private=Handler.downloader.private_names)
     Handler.adult = AdultGate(cfg["adult"], lambda: save_config(Handler.cfg))
+    stream_cfg = cfg.get("stream") or {}
+    Handler.streamer = Streamer(ROOT / "data", find_torrserver(stream_cfg.get("torrserver")),
+                                int(stream_cfg.get("cache_mb", 512)), int(stream_cfg.get("preload_percent", 8)))
     if Handler.downloader.available and Handler.downloader.meta and dl.get("folder"):
         # pick up unfinished downloads from last time
         threading.Thread(target=lambda: Handler.downloader.ensure(Handler.download_folder()), daemon=True).start()
     Handler.tvstate = TvState(ROOT / "data" / "tv_state.json")
     Handler.tvstate.start_checker(lambda title, cat: Handler.engine.search(title, cat, smart=False)["results"])
+    Handler.taste = Taste(Handler.tvstate, Handler.engine.smart, Handler.engine.details)
+    if Handler.tvstate.likes():
+        threading.Thread(target=Handler.taste.for_you, name="taste-warm", daemon=True).start()
     if cfg["tv"]["enabled"]:
         threading.Thread(target=warm_shelves, name="shelves", daemon=True).start()
     if tv_on and not cfg["tv"].get("pin"):
@@ -1178,6 +1454,10 @@ def main(argv: list[str] | None = None) -> int:
             message_box(msg)
             return 1
         sys.exit(msg)
+    jk = cfg["jackett"]
+    Handler.jackett = JackettRunner(find_jackett(jk.get("exe")), int(jk.get("port") or 9117))
+    if jk.get("autostart"):
+        Handler.jackett.start_async()
     print(f"BuzzTorrent {__version__} running at {url}")
     print(f"Sources: {', '.join(Handler.engine.providers)}")
     eng = Handler.scanner.engine
@@ -1185,6 +1465,7 @@ def main(argv: list[str] | None = None) -> int:
           f" (antivirus: {eng.name if eng else 'none found'})")
     if Handler.lan_bound:
         print(f"TV access on: http://{(tv.lan_addresses() or ['<this-pc-ip>'])[0]}:{port}/tv")
+        keep_awake_on_power()
     if args.app:
         if not tv_on:   # with TV access on, keep serving the TV after the PC window closes
             Handler.presence = Presence(server)
@@ -1203,6 +1484,8 @@ def main(argv: list[str] | None = None) -> int:
         pass
     finally:
         pid_file.unlink(missing_ok=True)
+        Handler.streamer.stop()
+        Handler.jackett.stop()
         server.server_close()
     return 0
 

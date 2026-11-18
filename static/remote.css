@@ -53,3 +53,12 @@ input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .toast { background: var(--surface-2); border: 1px solid var(--line); border-radius: 20px; padding: 10px 16px; font-size: 14px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
 .toast.ok { border-color: var(--safe); } .toast.bad { border-color: var(--danger); }
+.res { flex-wrap: wrap; }
+.res-m .seeds { font-weight: 700; color: var(--text-2); }
+.res-m .seeds.safe { color: var(--safe); } .res-m .seeds.caution { color: var(--caution); }
+.res-more { flex-basis: 100%; font-size: 14px; color: var(--text-2); border-top: 1px solid var(--line); padding-top: 8px; }
+.res-more p { margin: 6px 0; }
+.res-more b { color: var(--text); }
+.more-meta { color: var(--text-3); font-size: 13px; }
+.more-sum { white-space: pre-line; }
+#sorts { padding-top: 4px; }

@@ -5,8 +5,8 @@ music across several sources at once, and get a clean magnet link or a verified
 `.torrent` with a risk score attached. Then let the **download scanner**
 virus-scan the files once they've actually downloaded.
 
-Pure Python standard library: **no dependencies, nothing to `pip install`.** Python 3.10+ on Windows
-(search works on any OS; the antivirus integration uses Microsoft Defender).
+Pure Python standard library: **no dependencies, nothing to `pip install`.** Python 3.10+ on **Windows or macOS**
+(virus scanning uses Microsoft Defender on Windows and ClamAV on the Mac). Installing on a Mac: see [Mac](#mac-macos-11).
 
 ## Start / stop
 
@@ -22,7 +22,7 @@ Logs in app mode go to `data/buzztorrent.log`. Note: the download scanner only w
 ## PC and TV: same features, two layouts
 
 Both run on the same BuzzTorrent engine on this PC, so search, sources, safety, quality ranking, downloads,
-watchlist, Continue watching and the private section are shared. The PC page (mouse) and TV page (remote) also
+watchlist, Continue watching, likes / **♥ For you** and the private section are shared. The PC page (mouse) and TV page (remote) also
 have the same features:
 
 - **PC**: Continue watching, Your watchlist and the Indian classics rows on the home page; **My PC** (top bar) with a
@@ -32,6 +32,27 @@ have the same features:
 - **TV**: a **Downloads** screen with the PC's downloads (progress, pause, resume, stop) plus anything saved on the
   TV, and **quality / Safe only** filters on search results.
 - Settings, sources, Jackett and the download scanner stay PC-only, so nobody on the Wi-Fi can change them.
+
+## ♥ Like it, and get picks: "For you"
+
+Press **♡ Like** on any title's page or **while watching** (the TV page's player, the TV app's player, the PC player
+and the Quest cinema all have the button; on a remote, **Menu** likes in the TV app's player, or press ▼ for the HUD
+buttons on the TV page). Likes are kept on the PC, so they are the same on every screen.
+
+The **♥ For you** tab (TV) / section (PC home, **♥ For you** in the top bar) is your video jockey. It is built
+from what you liked, on the PC, with no API keys:
+
+- **Because you liked …** — titles Wikipedia considers closest to each of your last likes (its "more like this"
+  search), topped up with the same genres, language and people.
+- **More with …** — a director or star who keeps turning up in your likes.
+- **New … for you** — this year's and last year's releases in your favourite genres and language, so there is
+  always something fresh.
+- **Something different** — a popular genre you haven't liked yet, in your language.
+
+Picks leave out what you already liked or watched to the end, every pick says why it's there, and choosing one
+searches your sources for it. Likes feed the same Wikipedia/Wikidata lookups as the details page, so the
+**Smart search & details** setting covers them too (off = no picks). Unlike from the title's page, the PC's
+**Your likes** row, or by pressing ♥ again in a player. Private (18+) titles are never remembered.
 
 ## Built-in downloader
 
@@ -174,6 +195,15 @@ The 🛡 icon shows a red badge while any download needs attention.
 Settings → **Living-room TV** → turn on **TV access**. BuzzTorrent restarts listening on your home Wi-Fi and
 shows a **6-digit PIN** and this PC's address.
 
+**Streaming torrents (▶ Stream).** On the TV, torrent results stream instead of downloading. The PC runs
+[TorrServer](https://github.com/YouROK/TorrServer), hidden and reachable only from this PC with a random password.
+TorrServer fetches the video in playing order, buffers a few seconds, then the player starts. The first time you
+press ▶ Stream, BuzzTorrent installs TorrServer (about 60 MB) from its official GitHub release. It checks the
+SHA-256 against the one GitHub publishes and virus-scans the file first. Safety: only video files stream, and the first bytes must really be
+video (a renamed program is blocked). Program files in the torrent are named in a warning and never fetched.
+Pieces stay in memory and nothing is saved to disk. More seeds stream faster, so seed counts show on every
+result. Optional `config.json` settings: `"stream": {"cache_mb": 512, "preload_percent": 8}`.
+
 **Install the TV app** (once):
 1. On the TV, install **Downloader** (by AFTVnews) from the Play Store.
 2. TV Settings → Apps → Security & restrictions → Unknown sources → allow Downloader.
@@ -182,6 +212,59 @@ shows a **6-digit PIN** and this PC's address.
 
 (Or with ADB: `adb connect <tv-ip>` then `adb install android\build\BuzzTorrentTV.apk`.)
 No app? Any TV browser works: `http://<PC address>:8765/tv`.
+
+**Meta Quest 3** (TV app 1.9+): the same app runs as a 16:9 panel. Quest has no Downloader/Play Store, so:
+turn on Developer Mode (Meta Horizon phone app → Devices → Developer Mode), plug the Quest into the PC, allow USB
+debugging in the headset, then `adb install -r android\build\BuzzTorrentTV.apk`. It's under App Library →
+Unknown Sources. Point and click with the controllers or hands: buttons highlight when pointed at, and a
+**← Back** button appears on every screen. The player shows tap controls (−10 s / play-pause / +10 s, a draggable
+seek bar, CC, Quality, Next, Close); tap the picture to show or hide them. Voice search is hidden (the Quest has no
+speech recognizer; the Quest keyboard's own mic works), and *Where to watch* opens the service's website in the
+Quest browser. Quest Browser also works without installing: `http://<PC address>:8765/tv` (MP4s play; for
+MKV/HEVC use the app).
+
+**BuzzTorrent VR** (Meta Quest, `quest/`): the same browse screen, but ▶ Play opens a **VR cinema**: a giant
+screen in a room of your choice (🥽 **VR rooms** in the top bar goes straight in; **Room ▾** on the control bar
+lists every room to pick from). Rooms are real 3D, modelled in
+Blender and light-baked with Cycles (`quest/scenes/`), so moving your seat feels right:
+**Grand IMAX** (32 m hall, 20 m screen, leather recliners, star ceiling), **IMAX Laser** (giant 28 m × 19.6 m
+screen in the tall 1.43:1 IMAX shape set into a black acoustic front wall, 44 m × 40 m hall, 23 steep rows), **Royal Palace** (1920s picture palace,
+gilded arch, velvet, balconies, chandelier), **Private Lounge** (VIP sofas, walnut), **Drive-in** (your open 1950s
+convertible, two-tone 1950s sedans with whitewalls and chrome, fire barrels, festoon lights, neon sign),
+**Jungle camp** (a live campfire: flames, sparks and flickering firelight on a bed of coals; diya, tent, ferns),
+**Stargazing deck**, **Sunset terrace**, **Space** (a tiered orbital auditorium, Earth with city lights and the Moon beside the screen),
+**Dark void** and **My room** (passthrough: a big screen in your real room; the lights go down while
+the film plays, your room takes on the film's colours and the wall round the screen glows; **Lights:**
+Dim / Dark / On on the bar).
+- **The room is lit by the film**: each room also has a "screen light" layer; the app samples the picture's
+  average colour about 10 times a second and tints that layer, so bright scenes light the hall and a blue night
+  scene turns it blue. If a video's format stops that from working, it plays on without room lighting.
+- **Moving around**: left stick walks the way you look (up and down steps and tiers, never through walls or off
+  a ledge); right stick ◀▶ turns you 30°; hold **A** or **X**, aim the arc and let go to teleport (into any seat,
+  too). Right stick ▲▼ resizes the screen, **B**/**Y** hides the control bar; Seat ▲▼ on the bar changes your
+  height. Room, seat and size are remembered.
+- **🌐 Web** (on the control bar): a web browser on the same giant screen, in any room: YouTube, Prime Video,
+  Netflix, Twitch or any site, as the desktop site. Point and pull the trigger to click, drag or right stick ▲▼ to
+  scroll; click the address bar (or ⌨ Type after clicking a search box) for a big on-screen keyboard. Sites with
+  copy protection (Prime Video, Netflix) get only software Widevine in an app's browser, so they play at lower
+  quality if at all; for full HD use their own Quest apps. The room is lit evenly while a page is up (pages can't
+  be colour-sampled). 🎬 Back to film returns to the player.
+- Plays MKV, HEVC and 4K, decodes AC3 / E-AC3 / DTS / TrueHD sound in software (FFmpeg); same auto-quality,
+  subtitles and Continue watching as the TV app. Installs next to the 2D app and pairs with its own PIN.
+- Rebuild the rooms: `sh quest/scenes/run_all.sh` (Blender 5.1 and a GPU; about an hour), then build the app.
+- **PC ⇄ Mac toggle**: the headset (and the TV app) remembers every computer it was paired with. Pair once with
+  each (on the setup screen, or **＋ Mac** / **＋ PC** at the top of BuzzTorrent), then the **🖥 PC | 💻 Mac**
+  toggle in the top bar switches between them in one press, keeping each one's pairing. It works in the VR
+  cinema's 🎬 Movies screen too. If the one in use doesn't answer (you're somewhere else, or it's off), the
+  "Can't reach" screen offers **Switch to your PC/Mac** and searches the Wi-Fi; a computer that got a new address
+  from the router is recognised (each BuzzTorrent install has a random id) and reconnected by itself.
+- Build: `python quest\build_vr.py` (JDK 17 + Android SDK platform 35; Gradle comes with the project). Add
+  `--install` to install it on the Quest plugged in over USB (Developer Mode on). It's in App Library →
+  Unknown Sources → **BuzzTorrent VR**.
+- The browse screen and player logic are the TV app's own sources (`android/src`), shared, not copied.
+- Assets: [Poly Haven](https://polyhaven.com) models and skies (CC0), ESO/S. Brunier Milky Way (CC BY 4.0), NASA
+  Blue Marble / Black Marble (public domain); everything else is modelled in code. The APK contains Meta's
+  Spatial SDK and an FFmpeg build (LGPL/GPL); keep that in mind before sharing it.
 
 On the TV you get the same search (Movies, **TV Shows**, Music, every language), D-pad navigation, and per title:
 - **▶ Play on TV**: free Internet Archive videos stream straight to the TV (episode list for series), **best quality
@@ -249,15 +332,28 @@ allowed under Unknown sources. A Chromecast with Google TV needs a USB-C hub wit
 
 ## Mac (macOS 11+)
 
-Same app, same features. Copy the folder (or the share zip) to the Mac, then right-click
-**Setup BuzzTorrent (Mac).command** → Open → Open (first time only; macOS asks before running downloaded scripts).
-It walks through everything, asking before each step and skipping what's already there:
+Same app, same features. In Terminal:
+
+```sh
+git clone https://github.com/sudhansu0609/BuzzTorrent.git
+cd BuzzTorrent
+./install-mac.sh
+```
+
+(If `git` makes macOS offer the "command line developer tools", click Install, then run the lines again.
+Without git: copy the folder or the share zip over and right-click **Setup BuzzTorrent (Mac).command** → Open → Open.)
+`install-mac.sh` runs **Setup BuzzTorrent (Mac).command**, which walks through everything, asking before each step and skipping what's already there:
 [Homebrew](https://brew.sh), Python 3.10+, **aria2** (the built-in downloader), **ClamAV** (virus scan of every
 download, plus its virus database), optionally **VLC** and **Jackett** (installed as a background service and
 connected to BuzzTorrent automatically; `python3 app.py --connect-jackett` does that part on its own). It then adds
 **BuzzTorrent** to `~/Applications` and starts it: use that app (Launchpad/Spotlight) from then on.
 *Start BuzzTorrent.command* / *Stop BuzzTorrent.command* also work. Run the setup again any time to update the
-virus database or add something you skipped.
+virus database or add something you skipped. To update later: `git pull`, then reopen BuzzTorrent.
+
+The setup also offers to turn on **TV / VR headset access** on the Mac (`python3 app.py --enable-tv`; add
+`--tv-autostart` to run it at login) and shows the pairing PIN. While TV access is on and the Mac is on its
+charger, BuzzTorrent keeps it from sleeping (`caffeinate -s`) so the headset can still reach it; on battery the
+Mac sleeps as usual.
 
 Mac differences: virus scanning uses ClamAV instead of Microsoft Defender (plus BuzzTorrent's own content checks,
 which also catch Mac tricks: hidden `.app` programs, `.command` scripts, `.pkg`/`.dmg` installers); the app window

@@ -93,6 +93,30 @@ GENRE_LABELS = [("any", "All genres"), ("stories", "Stories · कहानि�
                 ("religion", "Religion & spirituality")]
 
 
+# Film / TV genres, matched against the Archive's subject tags (and its genre collections).
+MOVIE_GENRE_QUERY = {
+    "action": 'subject:(action OR "action film" OR "martial arts" OR "kung fu" OR adventure)',
+    "comedy": '(subject:(comedy OR comedies OR "comedy film") OR collection:Comedy_Films)',
+    "drama": 'subject:(drama OR dramas)',
+    "horror": '(subject:(horror OR "horror film" OR zombie OR zombies OR vampire OR ghost) OR collection:SciFi_Horror)',
+    "thriller": '(subject:(thriller OR suspense OR mystery OR "film noir" OR noir) OR collection:Film_Noir)',
+    "romance": 'subject:(romance OR romantic OR "love story")',
+    "scifi": 'subject:("science fiction" OR "sci-fi" OR scifi OR "space travel" OR aliens)',
+    "animation": '(subject:(animation OR animated OR cartoon OR cartoons OR anime) OR collection:animationandcartoons)',
+    "documentary": 'subject:(documentary OR documentaries)',
+    "family": 'subject:("family film" OR "family movie" OR "children\'s film" OR "children\'s movie" OR "kids movie" OR "for kids")',
+    "crime": 'subject:(crime OR gangster OR gangsters OR detective OR heist)',
+    "war": 'subject:("war film" OR "war movie" OR "world war ii" OR "world war 2" OR "vietnam war" OR "war drama")',
+    "western": 'subject:(western OR westerns OR cowboy)',
+    "mythology": 'subject:(mythology OR mythological OR devotional OR bhakti OR ramayan OR ramayana OR mahabharat)',
+}
+MOVIE_GENRE_LABELS = [("any", "All genres"), ("action", "Action & adventure"), ("comedy", "Comedy"), ("drama", "Drama"),
+                      ("horror", "Horror"), ("thriller", "Thriller & mystery"), ("romance", "Romance"),
+                      ("scifi", "Sci-fi"), ("animation", "Animation"), ("documentary", "Documentary"),
+                      ("family", "Family & kids"), ("crime", "Crime"), ("war", "War"), ("western", "Western"),
+                      ("mythology", "Mythology & devotional")]
+
+
 def lang_filters(category: str, lang: str, genre: str) -> list[str]:
     parts = []
     if lang in LANG_QUERY:
@@ -102,6 +126,8 @@ def lang_filters(category: str, lang: str, genre: str) -> list[str]:
         parts.append(f"(subject:{g} OR title:{g})")
         if genre != "religion":   # religious texts dominate popularity in several languages
             parts.append(f"NOT subject:{RELIGIOUS}")
+    elif genre in MOVIE_GENRE_QUERY and category in ("movies", "tv", "all"):
+        parts.append(MOVIE_GENRE_QUERY[genre])
     return parts
 
 
@@ -217,7 +243,8 @@ class ArchiveOrgProvider(Provider):
                 "sorts": [{"id": s, "label": l} for s, l, _ in SORTS],
                 "decades": [{"id": d, "label": l} for d, l in DECADES],
                 "languages": [{"id": i, "label": l} for i, l in LANG_LABELS],
-                "genres": [{"id": i, "label": l} for i, l in GENRE_LABELS]}
+                "genres": [{"id": i, "label": l} for i, l in GENRE_LABELS],
+                "movie_genres": [{"id": i, "label": l} for i, l in MOVIE_GENRE_LABELS]}
 
     def _query(self, params: list, category: str, force: bool = True) -> tuple[list[Result], int]:
         params = params + [("output", "json")] + [("fl[]", f) for f in FIELDS]

@@ -54,6 +54,13 @@ class FilterTests(unittest.TestCase):
         self.assertNotIn("NOT subject", " ".join(lang_filters("books", "hi", "religion")))
         self.assertEqual(lang_filters("movies", "any", "poetry"), [])   # genres only apply to books
 
+    def test_movie_genres(self):
+        q = " AND ".join(lang_filters("movies", "hi", "comedy"))
+        self.assertIn("language:(hin OR Hindi OR hi)", q)
+        self.assertIn("Comedy_Films", q)
+        self.assertEqual(lang_filters("books", "any", "comedy"), [])          # film genres don't touch books
+        self.assertEqual(lang_filters("music", "any", "horror"), [])
+
     def test_archive_language_values(self):
         self.assertEqual(doc_languages(["Hindi", "eng"]), ["hi", "en"])
         self.assertEqual(doc_languages("ben; Bengali"), ["bn"])

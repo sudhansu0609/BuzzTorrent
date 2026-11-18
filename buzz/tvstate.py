@@ -1,7 +1,9 @@
 """What the TV remembers, kept on the PC so every TV and phone shares it:
 - Continue watching: where each video was stopped.
 - Watchlist: titles to keep an eye on, re-checked in the background; when a sharper or a
-  free copy turns up, an alert says so ("1080p copy of Sholay is now available")."""
+  free copy turns up, an alert says so ("1080p copy of Sholay is now available").
+- Likes: titles the viewer pressed ♥ on, with what is known about them (genres, people,
+  language); the taste engine (buzz/taste.py) builds "For you" from these."""
 from __future__ import annotations
 
 import hashlib
@@ -16,11 +18,12 @@ from . import quality as Q
 
 MAX_PROGRESS = 300
 MAX_WATCH = 200
+MAX_LIKES = 500
 MAX_ALERTS = 100
 FINISHED = 0.94             # watched this far = finished, drops out of Continue watching
 MIN_RESUME = 30             # seconds; earlier stops start from the beginning
 CHECK_EVERY = 6 * 3600
-KEY = re.compile(r"^(ia:[A-Za-z0-9._-]{1,120}:.{1,300}|lib:[0-9a-f]{20})$")
+KEY = re.compile(r"^(ia:[A-Za-z0-9._-]{1,120}:.{1,300}|lib:[0-9a-f]{20}|bt:[0-9a-f]{40}:\d{1,5})$")
 
 
 def _clean(s, n: int) -> str:
@@ -31,7 +34,7 @@ class TvState:
     def __init__(self, path: Path):
         self.path = path
         self.lock = threading.RLock()
-        self.data = {"progress": {}, "watchlist": {}, "alerts": []}
+        self.data = {"progress": {}, "watchlist": {}, "alerts": [], "likes": {}}
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
             for k in self.data:
@@ -141,6 +144,61 @@ class TvState:
                     a["seen"], changed = True, True
             if changed:
                 self._save()
+
+    # --------------------------------------------------------------- likes
+    def like_add(self, body: dict) -> dict:
+        title = _clean(body.get("title"), 200)
+        category = body.get("category") if body.get("category") in ("movies", "tv", "music") else "movies"
+        if not title:
+            raise ValueError("need a title")
+        lid = self.watch_id(title, category)
+        with self.lock:
+            likes = self.data["likes"]
+            old = likes.get(lid, {})
+            likes[lid] = {**old, "id": lid, "title": title, "category": category,
+                          "year": body.get("year") if isinstance(body.get("year"), int) else old.get("year"),
+                          "thumb": _clean(body.get("thumb"), 300) or old.get("thumb", ""),
+                          "added": old.get("added", time.time()), "profile": old.get("profile")}
+            if len(likes) > MAX_LIKES:
+                for k, _ in sorted(likes.items(), key=lambda kv: kv[1]["added"])[:len(likes) - MAX_LIKES]:
+                    del likes[k]
+            self._save()
+            return dict(likes[lid])
+
+    def like_remove(self, lid: str) -> bool:
+        with self.lock:
+            gone = self.data["likes"].pop(lid, None) is not None
+            if gone:
+                self._save()
+            return gone
+
+    def likes(self) -> list[dict]:
+        with self.lock:
+            items = [dict(l) for l in self.data["likes"].values()]
+        items.sort(key=lambda l: -l["added"])
+        return items
+
+    def liked(self, title: str, category: str) -> dict | None:
+        """The like for a title, if there is one (categories "all"/"other" count as movies)."""
+        category = category if category in ("movies", "tv", "music") else "movies"
+        with self.lock:
+            like = self.data["likes"].get(self.watch_id(_clean(title, 200), category))
+            return dict(like) if like else None
+
+    def set_profile(self, lid: str, profile: dict | None) -> None:
+        """What the taste engine learned about a liked title (genres, people, qid...)."""
+        with self.lock:
+            like = self.data["likes"].get(lid)
+            if like is None:
+                return
+            like["profile"] = profile or {}
+            self._save()
+
+    def finished_titles(self) -> set[str]:
+        """Lower-cased titles watched to the end (left out of recommendations)."""
+        with self.lock:
+            return {e["title"].lower() for e in self.data["progress"].values()
+                    if e.get("title") and e.get("dur") and e["pos"] / e["dur"] >= FINISHED}
 
     # ----------------------------------------------------- background check
     def check_one(self, w: dict, search) -> None:

@@ -115,6 +115,21 @@ class DetailsService:
                 self._image_data.popitem(last=False)
         return data, kind
 
+    # ----------------------------------------------------------- posters
+    def poster(self, title: str, year: int | None, category: str) -> str | None:
+        """A poster for a film/show title (Wikipedia), for result cards. Cached, misses too."""
+        key = f"poster|{title.lower()}|{year}|{category}"
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key].get("poster")
+        wiki = self.smart.lookup(title, year, category)
+        url = self.register_image(wiki.get("thumb")) if wiki else None
+        with self._lock:
+            self._cache[key] = {"poster": url}
+            while len(self._cache) > 500:
+                self._cache.popitem(last=False)
+        return url
+
     # ----------------------------------------------------------- the lookup
     def for_result(self, r: Result, use_wiki: bool = True) -> dict:
         key = f"{r.id}|{use_wiki}"

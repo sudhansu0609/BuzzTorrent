@@ -7,8 +7,12 @@ Requests stay on that host only; torrent downloads that bounce elsewhere are ref
 """
 from __future__ import annotations
 
+import re
+import threading
+import time
 import urllib.parse
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, wait
 
 from ..fuzzy import LANGUAGES, detect_languages
 from ..magnet import clean_name, normalize_infohash, parse_magnet
@@ -17,8 +21,15 @@ from ..safehttp import FetchError, FetchPolicy, fetch
 from .base import Provider
 
 NS = {"torznab": "http://torznab.com/schemas/2015/feed"}
+TORZNAB_LIMIT = 200     # results asked of Jackett/Prowlarr per search
 CATS = {"movies": "2000", "tv": "5000", "music": "3000", "books": "7000",
         "games": "1000,4050", "software": "4000", "adult": "6000"}
+# Jackett's "all" endpoint waits for its slowest site (about 20 s on every search). Asking each
+# configured indexer directly, all at once, returns the same results in about a second.
+JACKETT_ALL = "/indexers/all/results/torznab"
+INDEXER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+INDEXER_TIMEOUT = 15      # seconds; a site slower than this is left out of that search
+INDEXER_LIST_TTL = 600
 BY_THOUSAND = {"1": "games", "2": "movies", "3": "music", "4": "software", "5": "tv", "6": "adult", "7": "books"}
 
 
@@ -63,8 +74,14 @@ class TorznabProvider(Provider):
         self.host = parts.hostname
         self.api_policy = FetchPolicy((self.host,), allow_private, content_types=("xml", "rss"),
                                       max_bytes=8 * 1024 * 1024, timeout=38)
+        self.indexer_policy = FetchPolicy((self.host,), allow_private, content_types=("xml", "rss"),
+                                          max_bytes=4 * 1024 * 1024, timeout=INDEXER_TIMEOUT)
         self.torrent_policy = FetchPolicy((self.host,), allow_private,
                                           content_types=("bittorrent", "octet-stream"))
+        self._lock = threading.Lock()
+        self._ix: list[str] = []
+        self._ix_at = 0.0
+        self._pool: ThreadPoolExecutor | None = None
 
     def _same_host(self, url: str | None) -> str | None:
         if url and url.lower().startswith(("http://", "https://")) \
@@ -72,10 +89,48 @@ class TorznabProvider(Provider):
             return url
         return None
 
-    def _url(self, params: dict) -> str:
+    def _url(self, params: dict, endpoint: str | None = None) -> str:
         if self.apikey:
             params = {**params, "apikey": self.apikey}
-        return self.endpoint + ("&" if "?" in self.endpoint else "?") + urllib.parse.urlencode(params)
+        endpoint = endpoint or self.endpoint
+        return endpoint + ("&" if "?" in endpoint else "?") + urllib.parse.urlencode(params)
+
+    def _indexers(self) -> list[str]:
+        """Jackett's configured indexers (cached), or [] for any other kind of endpoint."""
+        if JACKETT_ALL not in self.endpoint:
+            return []
+        with self._lock:
+            if time.time() - self._ix_at < INDEXER_LIST_TTL:
+                return self._ix
+        ids: list[str] = []
+        try:
+            body = fetch(self._url({"t": "indexers", "configured": "true"}), self.api_policy)
+            if b"<!DOCTYPE" not in body[:2048].upper() and b"<!ENTITY" not in body:
+                ids = [i for i in (el.get("id") or "" for el in ET.fromstring(body).iter("indexer"))
+                       if INDEXER_ID.match(i)]
+        except (FetchError, ET.ParseError):
+            ids = []
+        with self._lock:
+            self._ix = ids
+            self._ix_at = time.time() if ids else time.time() - INDEXER_LIST_TTL + 60   # retry a failure in a minute
+        return ids
+
+    def _search_each(self, params: dict, ids: list[str]) -> list[Result]:
+        with self._lock:
+            if self._pool is None:
+                self._pool = ThreadPoolExecutor(max_workers=24, thread_name_prefix="indexer")
+        futs = [self._pool.submit(self._fetch_feed, params, self.endpoint.replace(JACKETT_ALL, f"/indexers/{i}/results/torznab"),
+                                  self.indexer_policy) for i in ids]
+        done, pending = wait(futs, timeout=INDEXER_TIMEOUT + 3)
+        out, failed = [], len(pending)
+        for f in done:
+            try:
+                out.extend(f.result()[0])
+            except (FetchError, ValueError, OSError):
+                failed += 1
+        if failed == len(ids):
+            raise FetchError("every Jackett indexer failed; is Jackett running?")
+        return out
 
     def test(self) -> str:
         """Ask the indexer for its capabilities; raise FetchError on any problem."""
@@ -96,9 +151,15 @@ class TorznabProvider(Provider):
     def search(self, query: str, category: str, limit: int, lang: str = "any", genre: str = "any") -> list[Result]:
         # Torznab has no language parameter, but Indian releases name their language
         # ("… Hindi 1080p", "… Bangla Movie"): add the word, then keep matching titles.
-        params = {"t": "search", "q": _with_language(query, lang), "limit": str(limit)}
+        # Jackett merges every site into one list: ask for plenty, so the sharpest copies aren't cut off
+        # at the first 50 (a plain "golmaal" finds 200+). Ranking and filtering happen afterwards.
+        params = {"t": "search", "q": _with_language(query, lang), "limit": str(max(limit, TORZNAB_LIMIT))}
         if category in CATS:
             params["cat"] = CATS[category]
+        ids = self._indexers()
+        if ids:
+            params["limit"] = str(max(limit, TORZNAB_LIMIT // 2))
+            return _only_language(self._search_each(params, ids), lang)
         return _only_language(self._fetch_feed(params)[0], lang)
 
     def browse_options(self) -> dict:
@@ -123,8 +184,9 @@ class TorznabProvider(Provider):
         results, total = self._fetch_feed(params)
         return _only_language(results, lang), total
 
-    def _fetch_feed(self, params: dict) -> tuple[list[Result], int | None]:
-        body = fetch(self._url(params), self.api_policy)
+    def _fetch_feed(self, params: dict, endpoint: str | None = None,
+                    policy: FetchPolicy | None = None) -> tuple[list[Result], int | None]:
+        body = fetch(self._url(params, endpoint), policy or self.api_policy)
         if b"<!DOCTYPE" in body[:2048].upper() or b"<!ENTITY" in body:
             raise FetchError("feed contains a DTD; refused (XML entity attack guard)")
         try:

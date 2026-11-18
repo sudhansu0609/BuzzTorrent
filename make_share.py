@@ -22,12 +22,13 @@ ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 
 INCLUDE = ["app.py", "launcher.pyw", "Start BuzzTorrent.bat", "Stop BuzzTorrent.bat", "Start BuzzTorrent.command",
-           "Stop BuzzTorrent.command", "Setup BuzzTorrent (Mac).command", "README.md", "config.example.json",
+           "Stop BuzzTorrent.command", "Setup BuzzTorrent (Mac).command", "install-mac.sh", "README.md", "config.example.json",
            ".gitignore"]
-EXECUTABLE = {"Start BuzzTorrent.command", "Stop BuzzTorrent.command", "Setup BuzzTorrent (Mac).command"}      # double-clickable on a Mac
+EXECUTABLE = {"Start BuzzTorrent.command", "Stop BuzzTorrent.command", "Setup BuzzTorrent (Mac).command", "install-mac.sh"}      # double-clickable on a Mac
 INCLUDE_DIRS = ["buzz", "static", "tests", "android/src", "android/res", "android/assets"]
 INCLUDE_ANDROID = ["android/AndroidManifest.xml", "android/build_apk.py", "android/make_icons.py",
-                   "android/version.json", "android/build/BuzzTorrentTV.apk"]
+                   "android/version.json", "android/build/BuzzTorrentTV.apk",
+                   "quest/build/BuzzTorrentVR.apk"]
 SKIP_PARTS = {"__pycache__", ".pytest_cache"}
 SKIP_SUFFIX = {".pyc", ".pyo", ".tmp", ".log", ".keystore", ".jks"}
 

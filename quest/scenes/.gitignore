@@ -1,0 +1,5 @@
+_downloads/
+*_lit.jpg
+__pycache__/
+*_glow.jpg
+run_all.log

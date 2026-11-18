@@ -1,6 +1,8 @@
 "use strict";
 /* BuzzTorrent phone remote: search here, results appear on the living-room TV. */
 const $ = (s, el = document) => el.querySelector(s);
+const PC = document.documentElement.dataset.host || "PC";     // "PC" or "Mac", set by the server
+document.querySelectorAll(".pc").forEach((el) => { el.textContent = PC; });
 
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
@@ -22,7 +24,7 @@ const CATS = [["movies", "Movies"], ["tv", "TV Shows"], ["music", "Music"], ["al
 const LANGS = [["any", "All languages"], ["hi", "Hindi"], ["bho", "Bhojpuri"], ["bn", "Bengali"], ["ur", "Urdu"],
   ["ta", "Tamil"], ["te", "Telugu"], ["mr", "Marathi"], ["pa", "Punjabi"], ["en", "English"]];
 const CAT_NOUN = { movies: "Film", tv: "TV", music: "Music", books: "Book", games: "Game", software: "Software" };
-const state = { cat: store.get("cat", "movies"), lang: store.get("lang", "any"), view: 0 };
+const state = { cat: store.get("cat", "movies"), lang: store.get("lang", "any"), sort: store.get("sort", "match"), view: 0, items: [] };
 if (!CATS.some(([id]) => id === state.cat)) state.cat = "movies";
 if (!LANGS.some(([id]) => id === state.lang)) state.lang = "any";
 
@@ -33,9 +35,9 @@ async function api(path, body) {
     headers: { "Content-Type": "application/json", "X-BuzzTorrent": "1" }, body: JSON.stringify(body),
   };
   let res;
-  try { res = await fetch(path, opts); } catch { throw new Error("Can't reach BuzzTorrent. Is the PC on, and this phone on the home Wi-Fi?"); }
+  try { res = await fetch(path, opts); } catch { throw new Error(`Can't reach BuzzTorrent. Is the ${PC} on, and this phone on the home Wi-Fi?`); }
   let data;
-  try { data = await res.json(); } catch { throw new Error(`The PC answered with an error (${res.status})`); }
+  try { data = await res.json(); } catch { throw new Error(`The ${PC} answered with an error (${res.status})`); }
   if (res.status === 401 && data.pair) { showPair(); throw new NeedPair("pair first"); }
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
@@ -94,11 +96,62 @@ async function search(e) {
   try {
     const d = await api("/api/search?" + qs({ q, cat: state.cat, lang: state.lang }));
     if (view !== state.view) return;
-    const items = d.results.filter((r) => r.verdict !== "danger");
-    $("#results").replaceChildren(...(items.length ? items.slice(0, 40).map(row)
-      : [h("li", { class: "status", text: "Nothing found. Try another spelling or language." })]));
+    state.items = d.results.filter((r) => r.verdict !== "danger");
+    drawResults();
   } catch (err) {
     if (!(err instanceof NeedPair)) $("#results").replaceChildren(h("li", { class: "status", text: err.message }));
+  }
+}
+
+/* Sort: best match (the PC's ranking) or most seeds (seeds = how fast it streams) */
+const SORTS = [["match", "Best match"], ["seeds", "Most seeds"], ["size", "Biggest"]];
+function drawResults() {
+  const items = [...state.items];
+  if (state.sort === "seeds") items.sort((a, b) => (b.seeders ?? -1) - (a.seeders ?? -1));
+  if (state.sort === "size") items.sort((a, b) => (b.size || 0) - (a.size || 0));
+  $("#sorts").hidden = !items.length;
+  $("#sorts").replaceChildren(...SORTS.map(([id, label]) => h("button", { type: "button", class: "chip", "aria-pressed": String(id === state.sort),
+    text: label, onclick: () => { state.sort = id; store.set("sort", id); drawResults(); } })));
+  const shown = items.slice(0, 60);
+  $("#results").replaceChildren(...(shown.length ? shown.map(row)
+    : [h("li", { class: "status", text: "Nothing found. Try another spelling or language." })]));
+  loadPosters(shown.filter((r) => !r.thumb));
+}
+
+/* Torrents have no artwork: the PC finds posters on Wikipedia, a moment after the list */
+async function loadPosters(items) {
+  if (!items.length) return;
+  const view = state.view;
+  try {
+    const { posters } = await api("/api/posters?" + qs({ ids: items.map((r) => r.id).join(",") }));
+    if (view !== state.view) return;
+    for (const r of items) {
+      if (!posters[r.id]) continue;
+      r.thumb = posters[r.id];
+      const ph = document.querySelector(`.res[data-id="${CSS.escape(r.id)}"] .ph`);
+      if (ph) ph.replaceWith(h("img", { src: r.thumb, alt: "", loading: "lazy" }));
+    }
+  } catch { /* posters are a nicety */ }
+}
+
+/* Details under a result: summary, cast, director, runtime, genres (Wikipedia/Wikidata) */
+async function toggleDetails(r, li, btn) {
+  const open = li.querySelector(".res-more");
+  if (open) { open.remove(); btn.textContent = "Details"; return; }
+  btn.textContent = "Hide details";
+  const box = h("div", { class: "res-more" }, h("span", { class: "spin" }), "Looking it up…");
+  li.append(box);
+  try {
+    const d = await api("/api/details?" + qs({ id: r.id }));
+    const facts = (d.facts || []).filter((f) => f.label !== "Cast").slice(0, 3);
+    box.replaceChildren(
+      h("div", { class: "more-meta", text: [d.year, d.runtime, (d.genres || []).slice(0, 3).join(", "), d.language].filter(Boolean).join(" · ") }),
+      d.summary ? h("p", { class: "more-sum", dir: "auto", text: d.summary }) : h("p", { class: "more-sum", text: "No summary found for this one." }),
+      d.cast && d.cast.length ? h("p", {}, h("b", { text: "Cast: " }), d.cast.slice(0, 10).join(", ")) : null,
+      ...facts.map((f) => h("p", {}, h("b", { text: f.label + ": " }), f.values.join(", "))));
+    if (d.poster && !r.thumb) li.querySelector(".ph")?.replaceWith(h("img", { src: d.poster, alt: "" }));
+  } catch (err) {
+    if (!(err instanceof NeedPair)) box.textContent = err.message;
   }
 }
 
@@ -109,15 +162,23 @@ function row(r) {
     img = h("img", { src: r.thumb, alt: "", loading: "lazy" });
     img.addEventListener("error", () => img.replaceWith(h("div", { class: "ph" })), { once: true });
   }
+  const seeds = free || r.seeders == null ? null
+    : h("span", { class: "seeds " + (r.seeders >= 20 ? "safe" : r.seeders >= 5 ? "" : "caution"),
+      text: `${r.seeders} seed${r.seeders === 1 ? "" : "s"}${r.seeders < 5 ? " (slow)" : ""}` });
   const meta = h("div", { class: "res-m" },
     h("span", { class: r.verdict, text: r.verdict === "safe" ? "Safe" : r.verdict === "caution" ? "Caution" : "Unrated" }),
-    " · ", [r.year, CAT_NOUN[r.category], fmtSize(r.size)].filter(Boolean).join(" · "),
-    r.quality ? [" · ", h("b", { text: r.quality.label })] : null);
-  return h("li", { class: "res" }, img, h("div", { class: "res-body" },
+    " · ", [r.year, fmtSize(r.size)].filter(Boolean).join(" · "),
+    r.quality ? [" · ", h("b", { text: r.quality.label })] : null,
+    seeds ? [" · ", seeds] : null);
+  const li = h("li", { class: "res", "data-id": r.id });
+  const more = h("button", { type: "button", text: "Details", onclick: () => toggleDetails(r, li, more) });
+  li.append(img, h("div", { class: "res-body" },
     h("div", { class: "res-t", dir: "auto", text: r.title }), meta,
     h("div", { class: "res-btns" },
-      free ? h("button", { type: "button", class: "primary", text: "▶ Play on TV", onclick: () => send({ action: "play", id: r.id }, "Playing on your TV") }) : null,
+      h("button", { type: "button", class: "primary", text: free ? "▶ Play on TV" : "▶ Stream on TV",
+        onclick: () => send({ action: "play", id: r.id }, free ? "Playing on your TV" : "Starting the stream on your TV") }),
       h("button", { type: "button", text: "Open on TV", onclick: () => send({ action: "open", id: r.id }, "Opened on your TV") }),
+      more,
       h("button", { type: "button", text: "☆ Watchlist", onclick: async (e) => {
         try {
           await api("/api/tv/watch", { title: r.title, category: ["movies", "tv", "music"].includes(r.category) ? r.category : "movies",
@@ -128,6 +189,7 @@ function row(r) {
           if (!(err instanceof NeedPair)) toast(err.message, "bad");
         }
       } }))));
+  return li;
 }
 
 /* pairing */
@@ -160,10 +222,22 @@ function ready() {
 $("#searchForm").addEventListener("submit", search);
 $("#homeBtn").addEventListener("click", () => send({ action: "home" }, "TV is back on the home screen"));
 
+/* After an update on the PC, an open phone page reloads itself (keeping the last search box text) */
+let uiVersion = null;
+async function checkForUpdate() {
+  try {
+    const hello = await api("/api/tv/hello");
+    if (uiVersion && hello.ui && hello.ui !== uiVersion) location.reload();
+  } catch { /* PC offline: try later */ }
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkForUpdate(); });
+setInterval(() => { if (!document.hidden) checkForUpdate(); }, 60000);
+
 (async function start() {
   chips();
   try {
     const hello = await api("/api/tv/hello");
+    uiVersion = hello.ui;
     if (!hello.paired) { showPair(); return; }
     ready();
   } catch (err) {

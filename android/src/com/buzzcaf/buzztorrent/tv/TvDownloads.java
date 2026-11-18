@@ -76,7 +76,10 @@ class TvDownloads {
     /** Returns "ok", "fallback" (saved to TV storage instead of the chosen drive) or an error. */
     String start(JSONObject o) {
         String url = o.optString("url");
-        if (!MainActivity.ARCHIVE_URL.matcher(url).matches()) return "Only free Internet Archive videos can be saved";
+        // Free Internet Archive videos, or videos from the paired PC's scanned library ("My PC")
+        String server = ctx.getSharedPreferences("buzztv", Context.MODE_PRIVATE).getString("server", "");
+        boolean fromPc = !server.isEmpty() && url.startsWith(server + "/api/tv/stream/");
+        if (!MainActivity.ARCHIVE_URL.matcher(url).matches() && !fromPc) return "This video can't be saved to the TV";
         String title = o.optString("title", "Video"), label = o.optString("label", "");
         int storage = o.optInt("storage", 0);
         String path = Uri.parse(url).getLastPathSegment();

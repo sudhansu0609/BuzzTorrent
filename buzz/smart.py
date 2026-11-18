@@ -93,11 +93,12 @@ class SmartSearch:
         q = d.get("query", {})
         return [h["title"] for h in q.get("search", [])], q.get("searchinfo", {}).get("suggestion")
 
-    def describe(self, titles: list[str], thumb: int = 160, wiki: str = "en") -> list[dict]:
+    def describe(self, titles: list[str], thumb: int = 320, wiki: str = "en") -> list[dict]:
         if not titles:
             return []
+        # pilicense=any: film posters are "non-free" images on Wikipedia, left out by default
         d = self._api(wiki, action="query", prop="description|pageimages|pageprops", piprop="thumbnail",
-                      pithumbsize=thumb, titles="|".join(titles[:20]), redirects=1)
+                      pithumbsize=thumb, pilicense="any", titles="|".join(titles[:20]), redirects=1)
         pages = {p["title"]: p for p in d.get("query", {}).get("pages", []) if "missing" not in p}
         redirects = {r["from"]: r["to"] for r in d.get("query", {}).get("redirects", [])}
         for n in d.get("query", {}).get("normalized", []):
@@ -185,7 +186,8 @@ class SmartSearch:
 
     def article(self, wiki_title: str, wiki: str = "en") -> dict:
         d = self._api(wiki, action="query", prop="extracts|pageimages|pageprops|info|description", exintro=1,
-                      explaintext=1, piprop="thumbnail", pithumbsize=600, inprop="url", titles=wiki_title, redirects=1)
+                      explaintext=1, piprop="thumbnail", pithumbsize=600, pilicense="any", inprop="url", titles=wiki_title,
+                      redirects=1)
         pages = d.get("query", {}).get("pages", [])
         if not pages or "missing" in pages[0]:
             return {}

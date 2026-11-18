@@ -21,6 +21,8 @@
             android:launchMode="singleTask"
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode">
+            <!-- Meta Quest opens 2D apps as a floating panel: start it as a 16:9 screen -->
+            <layout android:defaultWidth="1280dp" android:defaultHeight="720dp" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

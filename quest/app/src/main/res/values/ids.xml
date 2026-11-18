@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="cinema_screen" type="id" />
+    <item name="cinema_controls" type="id" />
+    <item name="cinema_subtitles" type="id" />
+    <item name="cinema_web" type="id" />
+    <item name="cinema_webbar" type="id" />
+    <item name="cinema_keys" type="id" />
+    <item name="cinema_rooms" type="id" />
+    <item name="cinema_settings" type="id" />
+    <item name="cinema_movies" type="id" />
+    <item name="cinema_moviesbar" type="id" />
+    <item name="cinema_movieskeys" type="id" />
+</resources>

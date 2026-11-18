@@ -2,6 +2,11 @@
 // Security note: every piece of text that comes from a search result is inserted
 // with textContent / attributes only. Nothing from the network touches innerHTML.
 
+// "PC" or "Mac": the server writes which into <html data-host>, and Mac-only wording into data-mac
+const HOST = document.documentElement.dataset.host || "PC";
+document.querySelectorAll(".pc").forEach((el) => { el.textContent = HOST; });
+if (HOST === "Mac") document.querySelectorAll("[data-mac]").forEach((el) => { el.textContent = el.dataset.mac; });
+
 const CATS = [["all", "All"], ["movies", "Movies"], ["tv", "TV"], ["games", "Games"],
   ["software", "Software"], ["books", "Books"], ["music", "Music"]];
 const CAT_LABEL = Object.fromEntries([...CATS, ["other", "Other"], ["adult", "18+"]]);
@@ -19,7 +24,9 @@ const SIZES = [["any", "Any"], ["lt1", "< 1 GB"], ["1to5", "1–5 GB"], ["gt5", 
 // exact title > near ("…: Movie Review") > loose match
 const matchTier = (r) => (r.relevance == null || r.relevance >= 0.97 ? 4 : r.relevance >= 0.9 ? 3 : r.relevance >= 0.8 ? 2 : 1);
 const VERDICT_ORDER = { safe: 0, caution: 1, unknown: 2, danger: 3 };
-const QUALITIES = [["any", "Any"], ["720", "720p+"], ["1080", "1080p+"], ["2160", "4K+"], ["4320", "8K"]];
+const QUALITIES = [["any", "Any"], ["720", "720p"], ["1080", "1080p"], ["2160", "4K"], ["4320", "8K"]];
+/* Exactly that quality ("1080p" leaves 4K copies out), by the same steps as the labels */
+const qualityStep = (h) => (h >= 4000 ? 4320 : h >= 2000 ? 2160 : h >= 1000 ? 1080 : h >= 690 ? 720 : 0);
 const THEMES = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
 const MAGNET_RE = /^magnet:\?xt=urn:btih:[0-9a-f]{40}(&[A-Za-z0-9._~%=&+-]*)?$/;
 const EXT_ICON = {
@@ -175,6 +182,7 @@ function goHome(push = true) {
   document.title = "BuzzTorrent";
   renderCatTiles();
   loadPersonal();
+  loadForYou();
   loadShelves();
   $("#qHero").focus();
 }
@@ -246,7 +254,7 @@ function passes(r, ignore) {
     if (state.size === "1to5" && (s < GB || s > 5 * GB)) return false;
     if (state.size === "gt5" && s <= 5 * GB) return false;
   }
-  if (state.minQuality !== "any" && !((r.quality?.height || 0) >= Number(state.minQuality) * 0.95)) return false;
+  if (state.minQuality !== "any" && qualityStep(r.quality?.height || 0) !== Number(state.minQuality)) return false;
   return true;
 }
 
@@ -662,6 +670,13 @@ function renderTv(s) {
   if (!s.apk) notes.push("The TV app isn't built yet (android\build_apk.py); a TV browser still works.");
   else if (s.apk_version) notes.push(`TV app version ${s.apk_version.name} is ready to install.`);
   notes.push(s.paired ? `${s.paired} TV${s.paired > 1 ? "s" : ""} paired.` : "No TV paired yet.");
+  for (const t of s.tvs || []) {
+    const ago = Math.max(1, Math.round((Date.now() / 1000 - t.at) / 60));
+    const latest = s.apk_version?.name;
+    const old = latest && /^\d/.test(t.app) && t.app !== latest;
+    notes.push(`TV at ${t.address} runs app ${t.app} (seen ${ago} min ago)${old ? `: install ${latest} to update` : ""}.`);
+    if (old) warn = true;
+  }
   if (s.magnet_app) notes.push(`Downloads start in ${s.magnet_app}.`);
   $("#tvState").textContent = notes.join(" ");
   $("#tvState").classList.toggle("warn", warn);
@@ -891,7 +906,8 @@ function renderScanner() {
   const e = s.engine;
   let engDot = "ok", engSub;
   const engVal = e ? e.name : "No antivirus found";
-  if (!e) { engDot = "bad"; engSub = "Content checks still run. Turn on Microsoft Defender for full virus scans."; }
+  if (!e) { engDot = "bad"; engSub = HOST === "Mac" ? "Content checks still run. Install ClamAV (run Setup BuzzTorrent (Mac) again) for full virus scans."
+    : "Content checks still run. Turn on Microsoft Defender for full virus scans."; }
   else if (e.enabled === false) { engDot = "warn"; engSub = "Defender is turned off (another antivirus may be active)"; }
   else engSub = [e.realtime ? "Real-time protection on" : e.realtime === false ? "Real-time protection OFF" : null,
     e.signatures ? `signatures ${e.signatures}` : null].filter(Boolean).join(" · ");
@@ -1225,7 +1241,8 @@ async function loadBrowse() {
   if (!so.sorts.some((s) => s.id === browse.sort)) browse.sort = so.sorts[0].id;
   if (!so.decades.some((d) => d.id === browse.decade)) browse.decade = so.decades[0].id;
   const langs = so.languages || [{ id: "any", label: "Any language" }];
-  const genres = genreApplies(browse.cat) ? (so.genres || []) : [];
+  const genres = ["movies", "tv"].includes(browse.cat) ? (so.movie_genres || [])
+    : genreApplies(browse.cat) ? (so.genres || []) : [];
   if (!langs.some((l) => l.id === browse.lang)) browse.lang = "any";
   if (!genres.some((g) => g.id === browse.genre)) browse.genre = "any";
 
@@ -1235,7 +1252,7 @@ async function loadBrowse() {
   fillSelect($("#bSort"), so.sorts.map((s) => [s.id, s.label]), browse.sort);
   fillSelect($("#bDecade"), so.decades.map((d) => [d.id, d.label]), browse.decade);
   fillSelect($("#bLang"), langs.map((l) => [l.id, l.label]), browse.lang);
-  fillSelect($("#bGenre"), genres.length ? genres.map((g) => [g.id, g.label]) : [["any", "Books only"]], browse.genre);
+  fillSelect($("#bGenre"), genres.length ? genres.map((g) => [g.id, g.label]) : [["any", "All genres"]], browse.genre);
 
   const catName = browse.cat === "all" ? "everything" : catWord(browse.cat);
   $("#browseTitle").textContent = `Browse ${catName}`;
@@ -1492,7 +1509,8 @@ function wirePlayAndWatch(r) {
       const d = await api(`/api/tv/play?id=${encodeURIComponent(r.id)}`);
       if (!d.files.length) { toast(d.note || "Nothing playable in this upload", "alert"); return; }
       closeDetail();
-      openPlayer({ title: $("#detailTitle").textContent || r.title, files: d.files, index: 0, progress: d.progress, thumb: r.thumb || "" });
+      openPlayer({ title: $("#detailTitle").textContent || r.title, files: d.files, index: 0, progress: d.progress, thumb: r.thumb || "",
+        like: likeInfo(r) });
     } catch (err) { toast(err.message, "alert"); }
   };
   const watch = $("#detail .act-watch");
@@ -1523,6 +1541,90 @@ function wirePlayAndWatch(r) {
       sync();
     } catch (err) { toast(err.message, "alert"); }
   };
+
+  const like = $("#detail .act-like");
+  like.hidden = r.category === "adult";
+  let liked = null;
+  const syncLike = () => { like.textContent = liked ? "♥ Liked" : "♡ Like"; };
+  syncLike();
+  if (r.category !== "adult") findLike(likeInfo(r)).then((e) => { liked = e; syncLike(); });
+  like.onclick = async () => { liked = await toggleLike(likeInfo(r), liked); syncLike(); };
+}
+
+/* ------------------------------------------------------------ likes */
+/* ♥ on a title: the PC keeps the likes, and buzz/taste.py turns them into the "For you" rows */
+const likeCat = (c) => (["movies", "tv", "music"].includes(c) ? c : "movies");
+function likeInfo(r) {
+  const d = r.details || null;
+  return { title: (d && d.title) || r.title, category: likeCat(r.category), year: (d && d.year) || r.year || null,
+    thumb: (d && d.poster) || r.thumb || "", rid: r.id };
+}
+async function findLike(info) {
+  try {
+    const t = String(info.title).toLowerCase();
+    return (await api("/api/tv/likes")).items.find((l) => l.title.toLowerCase() === t && l.category === info.category) || null;
+  } catch { return null; }
+}
+async function toggleLike(info, entry) {
+  try {
+    if (entry) {
+      await api("/api/tv/like", { action: "remove", id: entry.id });
+      toast("Removed from your likes");
+      if (!$("#home").hidden) loadForYou();
+      return null;
+    }
+    const d = await api("/api/tv/like", info);
+    toast("♥ Liked. Your picks under ♥ For you will catch up in a moment");
+    if (!$("#home").hidden) loadForYou();
+    return d.item;
+  } catch (err) { toast(err.message, "alert"); return entry; }
+}
+
+let forYouTimer = 0;
+async function loadForYou() {
+  const root = $("#foryou");
+  clearTimeout(forYouTimer);
+  let d, likes = [];
+  try {
+    d = await api("/api/tv/foryou");
+    if (d.likes) likes = (await api("/api/tv/likes")).items;
+  } catch { root.replaceChildren(); return; }
+  if ($("#home").hidden) return;
+  const head = (title, note) => h("div", { class: "shelf-head" }, h("h2", {}, icon("star"), title), note ? h("span", { class: "link small", text: note }) : null);
+  const shelf = (title, items, note) => h("section", { class: "shelf" }, head(title, note), h("ul", { class: "pick-grid" }, items));
+  if (d.off || !d.likes) {
+    root.replaceChildren(h("section", { class: "shelf" }, head("♥ For you"),
+      h("p", { class: "shelf-error", text: d.off ? "Picks need Smart search & details (Settings)." :
+        "Like a few movies or shows (♡ Like on a title, or while watching) and your video jockey lines up picks here." })));
+    return;
+  }
+  const sections = [];
+  if (d.building && !d.rows.length) {
+    sections.push(h("section", { class: "shelf" }, head("♥ For you"),
+      h("p", { class: "shelf-error" }, h("span", { class: "spinner" }), " Lining up picks from what you liked… a few seconds.")));
+  }
+  for (const row of d.rows) sections.push(shelf(row.label, row.items.slice(0, 10).map(recCardPc)));
+  sections.push(shelf("Your likes", likes.slice(0, 10).map(likeCardPc), d.building ? "Updating your picks…" : `${d.likes} liked`));
+  root.replaceChildren(...sections);
+  if (d.building) forYouTimer = setTimeout(loadForYou, 5000);
+}
+function recCardPc(it) {
+  const cat = CATS.some(([id]) => id === it.category) ? it.category : "all";
+  const go = () => search(it.title, cat);
+  return h("li", { class: "pick", tabindex: "0", title: it.description || it.title, onclick: go, onkeydown: (e) => { if (e.key === "Enter") go(); } },
+    h("div", { class: "pick-thumb" }, thumbOrPh(it.thumb, it.title)),
+    h("div", { class: "pick-body" }, h("h3", { class: "pick-title", dir: "auto", text: it.title }),
+      h("div", { class: "pick-meta" }, it.year ? h("span", { text: String(it.year) }) : null, h("span", { text: it.reason || "" }))));
+}
+function likeCardPc(l) {
+  const go = () => search(l.title, l.category);
+  const unlike = h("button", { type: "button", class: "btn btn-ghost btn-sm", text: "♥ Unlike", title: "Remove from your likes",
+    onclick: async (e) => { e.stopPropagation(); await toggleLike(l, l); } });
+  return h("li", { class: "pick", tabindex: "0", onclick: go, onkeydown: (e) => { if (e.key === "Enter" && e.target.tagName !== "BUTTON") go(); } },
+    h("div", { class: "pick-thumb" }, thumbOrPh(l.thumb, l.title)),
+    h("div", { class: "pick-body" }, h("h3", { class: "pick-title", dir: "auto", text: l.title }),
+      h("div", { class: "pick-meta" }, l.year ? h("span", { text: String(l.year) }) : null, h("span", { text: CAT_LABEL[l.category] || "" }))),
+    h("div", { class: "pick-actions" }, unlike));
 }
 
 /* ------------------------------------------------------- PC home rows */
@@ -1597,7 +1699,8 @@ async function resumePc(c) {
     }
     const d = await api(`/api/tv/play?ident=${encodeURIComponent(c.key.split(":")[1])}`);
     const i = Math.max(0, d.files.findIndex((f) => f.key === c.key));
-    openPlayer({ title: c.title, files: d.files, index: i, progress: d.progress, thumb: c.thumb || "" });
+    openPlayer({ title: c.title, files: d.files, index: i, progress: d.progress, thumb: c.thumb || "",
+      like: { title: c.title, category: "movies", year: null, thumb: c.thumb || "" } });
   } catch (err) { toast(err.message, "alert"); }
 }
 
@@ -1635,12 +1738,12 @@ async function showLibrary(push = true) {
 }
 function playLibraryPc(it, progress) {
   const versions = (it.versions || []).map((v) => ({ url: v.stream, label: v.label, format: v.ext.toUpperCase(), size: v.size, id: v.id }));
-  openPlayer({ title: it.title, progress, thumb: "", lib: it.id,
+  openPlayer({ title: it.title, progress, thumb: "", lib: it.id, like: it.private ? null : { title: it.title, category: "movies", year: it.year || null, thumb: "" },
     files: [{ name: it.title, key: it.key, resume: it.resume || 0, seconds: 0, subs: it.subs, versions }], index: 0 });
 }
 
 /* --------------------------------------------------------- PC player */
-const pcp = { files: [], i: 0, v: 0, title: "", progress: "", thumb: "", saved: 0, cues: null, lib: null, vlc: false };
+const pcp = { files: [], i: 0, v: 0, title: "", progress: "", thumb: "", saved: 0, cues: null, lib: null, vlc: false, like: null, liked: null };
 const pcVideo = () => $("#pcpVideo");
 const BROWSER_OK = { mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm", ogv: "video/ogg", mkv: "video/webm" };
 function browserCanPlay(v) {
@@ -1651,7 +1754,11 @@ function browserCanPlay(v) {
   return !!type && pcVideo().canPlayType(type) !== "";
 }
 async function openPlayer(o) {
-  Object.assign(pcp, { files: o.files, i: o.index || 0, title: o.title, progress: o.progress || "", thumb: o.thumb || "", lib: o.lib || null });
+  Object.assign(pcp, { files: o.files, i: o.index || 0, title: o.title, progress: o.progress || "", thumb: o.thumb || "", lib: o.lib || null,
+    like: o.like || null, liked: null });
+  $("#pcpLike").hidden = !pcp.like;
+  $("#pcpLike").textContent = "♡ Like";
+  if (pcp.like) findLike(pcp.like).then((e) => { if (pcp.like && e) { pcp.liked = e; $("#pcpLike").textContent = "♥ Liked"; } });
   try { pcp.vlc = (await api("/api/player/info")).vlc; } catch { pcp.vlc = false; }
   $("#pcPlayer").hidden = false;
   playFilePc(pcp.i, pcp.files[pcp.i].resume || 0);
@@ -1752,6 +1859,11 @@ function wirePlayer() {
     catch { toast("Couldn't load the subtitles", "alert"); }
   });
   $("#pcpRestart").addEventListener("click", () => { video.currentTime = 0; $("#pcpRestart").hidden = true; });
+  $("#pcpLike").addEventListener("click", async () => {
+    if (!pcp.like) return;
+    pcp.liked = await toggleLike(pcp.like, pcp.liked);
+    $("#pcpLike").textContent = pcp.liked ? "♥ Liked" : "♡ Like";
+  });
   $("#pcpExternal").addEventListener("click", async () => {
     const v = pcp.files[pcp.i].versions[pcp.v];
     try {
@@ -2073,6 +2185,10 @@ function init() {
   $("#openScannerFromSettings").addEventListener("click", () => { closeSettings(); showScanner(); });
   $("#downloadsBtn").addEventListener("click", () => showScanner());
   $("#libraryBtn").addEventListener("click", () => showLibrary());
+  $("#forYouBtn").addEventListener("click", () => {
+    if ($("#home").hidden) goHome();
+    $("#foryou").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
   wirePlayer();
   wireVoice();
   $("#dlOpenFolder").addEventListener("click", () => api("/api/downloads/open", {}).catch((err) => toast(err.message, "alert")));

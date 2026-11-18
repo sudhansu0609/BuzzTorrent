@@ -96,3 +96,68 @@ def parse(text: str) -> list[dict]:
             break
     cues.sort(key=lambda c: c["start"])
     return cues[:20000]
+
+
+# ---------------------------------------------------------------- online (SubDL)
+# subdl.com has a free API (sign up, then copy the key into Settings or config.json:
+# "subtitles": {"subdl_key": "..."}). Only the film's name/year/episode is sent.
+SUBDL_API = "https://api.subdl.com/api/v1/subtitles"
+SUBDL_DL = "https://dl.subdl.com"
+SUBDL_LANGS = {"EN": ("en", "English"), "HI": ("hi", "Hindi"), "BN": ("bn", "Bengali"), "UR": ("ur", "Urdu"),
+               "TA": ("ta", "Tamil"), "TE": ("te", "Telugu"), "ML": ("ml", "Malayalam"), "AR": ("ar", "Arabic"),
+               "ES": ("es", "Spanish"), "FR": ("fr", "French")}
+_SUBDL_PATH = re.compile(r"^/subtitle/[0-9A-Za-z_-]{1,40}\.zip$")
+_EPISODE = re.compile(r"\bS(\d{1,2})[ ._-]?E(\d{1,3})\b", re.I)
+
+
+def subdl_search(fetch_json, key: str, title: str, year: int | None, video_name: str,
+                 langs: str = "EN,HI", limit: int = 6) -> list[dict]:
+    """-> [{"lang", "label", "path"}]: the most-downloaded few per language."""
+    params = {"api_key": key, "film_name": title, "languages": langs, "subs_per_page": "30"}
+    ep = _EPISODE.search(video_name or "")
+    if ep:
+        params.update(type="tv", season_number=str(int(ep.group(1))), episode_number=str(int(ep.group(2))))
+    else:
+        params["type"] = "movie"
+        if year:
+            params["year"] = str(year)
+    d = fetch_json(SUBDL_API + "?" + "&".join(f"{k}={_q(v)}" for k, v in params.items()))
+    if not isinstance(d, dict) or not d.get("status"):
+        return []
+    out, per_lang = [], {}
+    release = re.sub(r"\.[a-z0-9]{2,4}$", "", (video_name or "").lower())
+    subs = [s for s in d.get("subtitles") or [] if isinstance(s, dict) and _SUBDL_PATH.match(str(s.get("url") or ""))]
+    # a subtitle made for this exact release is in sync; put those first
+    subs.sort(key=lambda s: release and str(s.get("release_name") or "").lower() not in release)
+    for s in subs:
+        code = str(s.get("lang") or s.get("language") or "").upper()[:2]
+        lang, name = SUBDL_LANGS.get(code, (code.lower(), str(s.get("language") or code)))
+        per_lang[lang] = per_lang.get(lang, 0) + 1
+        if per_lang[lang] > 2:
+            continue
+        out.append({"lang": lang, "label": f"{name} (online{'' if per_lang[lang] == 1 else ' 2'})", "path": s["url"]})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def subdl_valid(path: str) -> bool:
+    return bool(_SUBDL_PATH.match(path))
+
+
+def from_zip(data: bytes) -> bytes:
+    """The subtitle inside a downloaded .zip (size-checked: no zip bombs)."""
+    import io
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        files = [i for i in z.infolist() if not i.is_dir() and is_subtitle(i.filename.rsplit("/", 1)[-1])
+                 and i.file_size <= MAX_BYTES]
+        if not files:
+            raise ValueError("no subtitle file in the download")
+        files.sort(key=lambda i: not i.filename.lower().endswith(".srt"))
+        return z.read(files[0])
+
+
+def _q(v: str) -> str:
+    from urllib.parse import quote
+    return quote(str(v), safe="")
