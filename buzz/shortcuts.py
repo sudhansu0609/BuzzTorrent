@@ -47,7 +47,10 @@ def install_mac(root: Path) -> list[str]:
     exe.write_text("#!/bin/bash\n"
                    "# Starts BuzzTorrent (made by BuzzTorrent's installer; safe to delete with the app)\n"
                    f'cd "{root}" || exit 1\n'
-                   f'exec "{sys.executable}" "{root / "launcher.pyw"}" "$@"\n', encoding="utf-8")
+                   "# Detached, so this app exits at once: if the long-running server were the app's own\n"
+                   "# process, macOS would send later clicks to it as a 'reopen' event it never answers.\n"
+                   f'nohup "{sys.executable}" "{root / "launcher.pyw"}" "$@" >/dev/null 2>&1 &\n'
+                   "exit 0\n", encoding="utf-8")
     exe.chmod(0o755)
     icns = root / "static" / "buzztorrent.icns"
     if icns.is_file():
